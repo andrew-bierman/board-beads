@@ -89,6 +89,7 @@ Vercel Board (launched 2026-11-18) coordinates agent fleets through a message-st
 - R21. CI gates every change: Bun formatting and type checking, `bun test` against real bd fixtures (no mocks), and the conformance suite.
 - R22. The README documents quickstart, the bd↔Board mapping table, the single-writer contract, and the bd version policy (`>=1.3.4 <2`, gated at bind; updating bd is sanctioned when capabilities require it), written to be listable both as a Board backend and in beads' community tools. The quickstart covers the cold-start prerequisites before the mount — installing bd (and its Dolt requirement), creating the tracker with `bd init`, and installing Board/`vb` — so adopters arriving from Board's backend list are not bounced at step one.
 - R23. Every implemented route honors the verified caller's access per channel, as Board's Backend contract requires ("every method honors what it may do" — `board()` verifies callers and checks grants but the backend filters): readable-only filtering with not-found answers, author-scoped edit/delete, narrowed-caller refusals on watcher registration/acks and sync records, and actors visibility (R23 implements the caller-honoring side of R1; `board()` supplies the verified caller and its `access`).
+- R24. Hostile and degraded conditions are hard failures with typed answers, per the hardening bar (KTD15): unparseable or foreign tracker state, oversized inputs, missing/hung `bd`, and concurrent processes produce typed errors or documented bind-time degradation — no unhandled exception escapes a route, and no write corrupts tracker data.
 
 ### Success Criteria
 
@@ -138,6 +139,7 @@ None blocking. Execution-time unknowns (exact journal payload fields, conformanc
 - KTD12. **Units are speed-ordered as a walking skeleton** — transport and model before routes, conformance harness before polish — with the dependency-real parallel shape: U2∥U3 first, then U4∥U5; U6 and U7 additionally gate on U5 (their non-event scaffolding may start early; event-dependent scenarios gate on U5). (session-settled: user-directed — "being first mover is everything… get tons of subagents… go super fast".)
 - KTD13. **Per-issue in-process write gate.** Conformance races concurrent replies, labels, and edits on one message and requires exactly one winner with exact 409 codes; each write is a bd read-modify-write of one metadata JSON field, so the backend serializes an issue's metadata read-modify-write behind an in-process mutex keyed by issue ID — the single-writer process arbitrates caller races — and race losers answer `newer_message` / `label_conflict` / `revision_conflict` per the protocol. Alternative (bd-level compare-and-set) rejected: bd has no metadata CAS; the gate is the smallest mechanism that closes the gap.
 - KTD14. **Heavily config-driven surface.** The project's product philosophy: anything an operator could reasonably want to tune is an option with a sane default; anything internal stays internal. Config keys are additive forever — a knob ships in a minor, never renames, and defaults preserve prior behavior — so consumers can opt in to pieces (writer modes, namespaces, journal behavior) without taking the whole surface. 0.2.0 knobs: `dir`, `bdPath`, `systemActor`, label/metadata namespace override (multi-board-per-tracker), journal handling (warn/auto). Later minors: writer modes, reconciliation, authority. Alternatives (hardcoded conventions; mega-config up front) rejected — the first blocks real deployment shapes, the second builds unproven surface in the launch window.
+- KTD15. **Hardening bar.** Real users are the point, so every unit ships against a fixed bar, not a happy path: (1) every subprocess call is timeout-bounded with tree-kill and classifies ALL exits; (2) every input crossing a boundary (caller input, bd output, tracker state on disk) is validated — unparseable, foreign, or oversized state produces typed results, never crashes; (3) no unhandled exception escapes a route (500 `internal` is a bug, not a category); (4) no write corrupts tracker data or loses acknowledged state (bd is transactional per op — crash recovery leans on that, verified by kill-restart tests); (5) degradation is documented at bind (version gate, journal state, TTL probe, capability flags are surfaced as bind diagnostics).
 
 ### Assumptions
 
@@ -234,7 +236,7 @@ board-beads/
 ├── scripts/                # conformance.ts (U8), demo.ts (S2, U8), verify-platform.ts (U1)
 ├── test/helpers/bd-fixture.ts
 ├── evidence/               # conformance receipts
-└── docs/                   # mapping.md, research/landscape-2026-11-19.md, plans/
+└── docs/                   # research/landscape-2026-11-19.md, plans/
 ```
 
 ---
@@ -398,7 +400,7 @@ All units ship in this PR: U1–U3 first, U4∥U5 next, U6 and U7 once U5 lands 
 - **Goal:** The done-bar executes in CI and the package ships.
 - **Requirements:** R2, R3, R20–R22; KTD7, KTD8, KTD9, KTD10.
 - **Dependencies:** U4–U7.
-- **Files:** `scripts/conformance.ts`, `scripts/demo.ts`, `src/backend.ts` (501 table), `README.md` (full), `docs/mapping.md`, `docs/research/landscape-2026-11-19.md`, `evidence/conformance-0.2.0.json`, `.github/workflows/release.yml` (finalized), `CHANGELOG.md`.
+- **Files:** `scripts/conformance.ts`, `scripts/demo.ts`, `src/backend.ts` (501 table), `README.md` (full), `docs/research/landscape-2026-11-19.md`, `evidence/conformance-0.2.0.json`, `.github/workflows/release.yml` (finalized), `CHANGELOG.md`.
 - **Approach:**
   1. `bun run conformance` mounts `conformance(board({ backend: beads({dir: fixture}) }))`, writes the machine receipt (groups/skips/counts) to `evidence/` (pigeon pattern); CI fails on any non-skip failure.
   2. The 501 table (KTD7) lives in one exported record; codes and hint strings match `local()`'s verified bodies.
@@ -406,7 +408,7 @@ All units ship in this PR: U1–U3 first, U4∥U5 next, U6 and U7 once U5 lands 
   4. Tag `v0.2.0` → provenance publish → S3 receipt; CHANGELOG starts the bump cadence (KTD8).
   5. Harness drives the header-gated conformance checks: mount the served board with an `authenticate` verifier and pass `withHeaders`/`withCan` so narrowing, profile-scoped edits, and watcher/inbox refusals are proven, not skipped (R23; the plain in-process run skips them).
   6. `scripts/demo.ts` (S2): two `vb` agents claim and complete tasks while a third agent's watcher wakes on a reply — fixture tracker, README instructions only.
-  7. README quickstart covers the cold-start prerequisites (install bd + its Dolt requirement, `bd init`, install Board/`vb`) before the mount; the docs smoke executes them verbatim from an uninitialized temp dir; commit the adapter-landscape search log as `docs/research/landscape-2026-11-19.md` (the Problem Frame's first-mover evidence, made durable); the operator opens the two community-listing PRs (announce duty, Goal Capsule).
+  7. README quickstart covers the cold-start prerequisites (install bd + its Dolt requirement, `bd init`, install Board/`vb`) before the mount; the docs smoke executes them verbatim from an uninitialized temp dir; commit the adapter-landscape search log as `docs/research/landscape-2026-11-19.md` (the Problem Frame's first-mover evidence, made durable); the operator opens the two community-listing PRs (announce duty, Goal Capsule) — concrete targets: (a) gastownhall/beads `docs/community-tools.md` entry in their format (name/link/description noting `bd` CLI + events-journal use/Built-by/language, in the integrations category), (b) vercel/board PR per their CONTRIBUTING (`docs(board): …` title; body answers Users / Protocol & backends / Performance & I/O / Tests) adding a beads guide under `packages/board/docs/03-guides/` or a community-backends section; draft both PR bodies for operator review; template-gallery submission (vercel.com/templates "Board + beads" starter) and announcements (Show HN, X) follow only after validation.
 - **Patterns to follow:** pigeon's `evidence/*.json` receipt; gitmoji release tag `🔖 chore(release): v0.2.0`.
 - **Test scenarios:**
   - Harness runs conformance in-process on a fixture tracker and writes a parseable receipt; a planted route failure turns the run red (gate proven).
