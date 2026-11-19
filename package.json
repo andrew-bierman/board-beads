@@ -1,6 +1,6 @@
 {
   "name": "board-beads",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Run Vercel Board on beads \u2014 a Board Backend backed by your beads tracker (bd).",
   "type": "module",
   "license": "MPL-2.0",
