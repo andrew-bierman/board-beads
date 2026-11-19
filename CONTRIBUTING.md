@@ -26,8 +26,8 @@
 Every change passes:
 
 ```bash
-bun run fmt             # format (bun fmt)
-bun run check           # typecheck (bun check)
+bun fmt             # format (bun fmt)
+bun check           # typecheck (bun check)
 bun test                # real-bd integration tests (no mocks)
 bun run verify:platform
 bun run conformance     # non-blocking in CI until the suite fully lands

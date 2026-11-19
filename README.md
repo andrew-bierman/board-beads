@@ -99,6 +99,7 @@ Write handling is **config-driven**: `writers: "single"` is the planned default 
 
 No dates, no promises beyond "0.x". Config keys are additive forever — a knob ships in a minor, defaults never change behavior, so you take the pieces you want and skip the rest.
 
+- [x] Package foundation — Bun-native gates, CI, real-bd fixtures, conformance harness inventory
 - [ ] Conformance-green core — discovery, messages, threads, event feed, watchers, sync records
 - [ ] Tasks — claims, leases, heartbeats, expiry via `bd`
 - [ ] Schedules, grants, schemas, attachments
@@ -110,8 +111,8 @@ No dates, no promises beyond "0.x". Config keys are additive forever — a knob 
 
 ```bash
 bun install
-bun run fmt             # format
-bun run check           # typecheck
+bun fmt             # format
+bun check           # typecheck
 bun test                # integration tests against real bd
 bun run verify:platform # platform export-condition check
 bun run conformance

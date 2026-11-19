@@ -36,13 +36,10 @@
     "LICENSE"
   ],
   "scripts": {
-    "fmt": "bun fmt",
-    "check": "bun check",
-    "test": "bun test",
     "conformance": "bun run scripts/conformance.ts",
     "verify:platform": "bun run scripts/verify-platform.ts",
     "build": "tsdown",
-    "prepublishOnly": "bun run check && bun test && bun run conformance && bun run build",
+    "prepublishOnly": "bun check && bun test && bun run conformance && bun run build",
     "fmt:check": "bun fmt --check"
   },
   "dependencies": {
