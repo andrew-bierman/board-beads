@@ -111,8 +111,8 @@ No dates, no promises beyond "0.x". Config keys are additive forever — a knob 
 
 ```bash
 bun install
-bun run fmt             # format
-bun run check           # typecheck
+bun fmt             # format
+bun check           # typecheck
 bun test                # integration tests against real bd
 bun run verify:platform # platform export-condition check
 bun run conformance
