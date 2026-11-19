@@ -1,8 +1,8 @@
 {
   "backend": "conformance-stub-backend",
   "suite": "@vercel/board/conformance",
-  "startedAt": "2026-11-19T22:59:19.851Z",
-  "finishedAt": "2026-11-19T22:59:19.885Z",
+  "startedAt": "2026-11-19T23:35:18.685Z",
+  "finishedAt": "2026-11-19T23:35:18.720Z",
   "url": "http://in-process.board",
   "ok": false,
   "summary": {

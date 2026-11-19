@@ -9,6 +9,9 @@
  * ready, swap the one line marked INJECTION POINT; nothing else here changes.
  *
  * Flags:
+ * - `--backend beads` runs the real beads backend (`beads({ dir })` from src/) over a fresh,
+ *   real bd tracker per run (test/helpers/bd-fixture.ts — no mocks); `--backend stub` (the
+ *   default) runs the stub, unchanged.
  * - `--json out=<path>` writes the machine receipt to `path` instead of the evidence default.
  * - `--json` alone also prints the receipt JSON to stdout, as `vb conformance --json` does.
  *
@@ -19,26 +22,61 @@ import { board } from "@vercel/board";
 import { conformance, type ConformanceReport } from "@vercel/board/conformance";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { createStubBackend } from "./conformance-stub-backend.ts";
+import { beads } from "../src/index.ts";
+import { createBdFixture } from "../test/helpers/bd-fixture.ts";
 
 // --- INJECTION POINT: replace with the real beads backend's factory -------------------------
 const createBackend = createStubBackend;
+/**
+ * The real backend, for `--backend beads`: a fresh, real bd tracker per run (the fixture boots
+ * the actual `bd` CLI — no mocks) and `beads({ dir })` over it. Returns the fixture's closer so
+ * the run's temp workspace and HOME go when the report is written.
+ */
+const createBeads = async (): Promise<{
+  backend: ReturnType<typeof beads>;
+  bdVersion: string;
+  close: () => void;
+}> => {
+  const fixture = await createBdFixture();
+  return {
+    backend: beads({ dir: fixture.dir }),
+    bdVersion: `${fixture.version.major}.${fixture.version.minor}.${fixture.version.patch}`,
+    close: fixture.close,
+  };
+};
 // --------------------------------------------------------------------------------------------
+
+/** Which backend a run answers with: `--backend beads`, or the stub by default. */
+type BackendMode = "stub" | "beads";
 
 const evidenceDir = new URL("../evidence/", import.meta.url);
 const defaultReceiptPath = new URL("conformance-inventory.json", evidenceDir);
 
 const usage = (arg: string): never => {
-  console.error(`board-beads conformance: unknown argument ${JSON.stringify(arg)}; use --json or --json out=<path>`);
+  console.error(
+    `board-beads conformance: unknown argument ${JSON.stringify(arg)}; use --backend beads|stub, --json, or --json out=<path>`,
+  );
   process.exit(2);
 };
 
-/** `--json` (print the receipt to stdout too) and `--json out=<path>` (write it there instead). */
-const parseArgs = (argv: readonly string[]): { printJson: boolean; receiptPath: URL } => {
+/** `--json` (print the receipt to stdout too), `--json out=<path>` (write it there instead), and `--backend beads|stub`. */
+const parseArgs = (
+  argv: readonly string[],
+): { backend: BackendMode; printJson: boolean; receiptPath: URL } => {
+  let backend: BackendMode = "stub";
   let printJson = false;
   let receiptPath = defaultReceiptPath;
   /** The `--json` that an `out=<path>` that follows belongs to. */
   let jsonPending = false;
-  for (const arg of argv) {
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]!;
+    if (arg === "--backend" || arg.startsWith("--backend=")) {
+      const value = arg === "--backend" ? argv[i + 1] : arg.slice("--backend=".length);
+      if (value === "stub" || value === "beads") backend = value;
+      else usage(value ?? "(no value)");
+      if (arg === "--backend") i++;
+      continue;
+    }
     if (arg === "--json") {
       printJson = true;
       jsonPending = true;
@@ -60,16 +98,20 @@ const parseArgs = (argv: readonly string[]): { printJson: boolean; receiptPath: 
     }
     usage(arg);
   }
-  return { printJson, receiptPath };
+  return { backend, printJson, receiptPath };
 };
 
 /** Where `out=<path>` writes: relative paths land in evidence/, beside the default receipt. */
 const receiptOf = (out: string): URL => {
   if (out === "") {
-    console.error("board-beads conformance: --json needs a path: --json out=<path>");
+    console.error(
+      "board-beads conformance: --json needs a path: --json out=<path>",
+    );
     process.exit(2);
   }
-  return out.startsWith("/") ? new URL(`file://${out}`) : new URL(out, evidenceDir);
+  return out.startsWith("/")
+    ? new URL(`file://${out}`)
+    : new URL(out, evidenceDir);
 };
 
 const summaryOf = (report: ConformanceReport) => {
@@ -91,16 +133,35 @@ const summaryOf = (report: ConformanceReport) => {
 };
 
 const run = async (): Promise<void> => {
-  const { printJson, receiptPath } = parseArgs(process.argv.slice(2));
+  const { backend, printJson, receiptPath } = parseArgs(process.argv.slice(2));
   const startedAt = new Date().toISOString();
   // conformance() never throws for what the board answers; a throw here is the harness's own
-  // (a backend factory that fails, or the suite's pre-check setup — discovery, me, the run's
-  // channel cursor — being refused outright).
-  const report = await conformance(board({ backend: createBackend() }));
+  // (a backend factory that fails — the beads fixture's bd boot included — or the suite's
+  // pre-check setup — discovery, me, the run's channel cursor — being refused outright).
+  let report: ConformanceReport;
+  /** The receipt's `backend` label: the stub's keeps its old value for comparability. */
+  let backendName: string;
+  let bdVersion: string | null = null;
+  let closeFixture: (() => void) | null = null;
+  try {
+    if (backend === "beads") {
+      const made = await createBeads();
+      bdVersion = made.bdVersion;
+      closeFixture = made.close;
+      backendName = "beads";
+      report = await conformance(board({ backend: made.backend }));
+    } else {
+      backendName = "conformance-stub-backend";
+      report = await conformance(board({ backend: createBackend() }));
+    }
+  } finally {
+    closeFixture?.();
+  }
   const finishedAt = new Date().toISOString();
 
   const receipt = {
-    backend: "conformance-stub-backend",
+    backend: backendName,
+    ...(bdVersion !== null ? { bdVersion } : {}),
     suite: "@vercel/board/conformance",
     startedAt,
     finishedAt,
@@ -124,7 +185,8 @@ const run = async (): Promise<void> => {
   const failed = report.checks.filter((check) => check.status === "failed");
   if (failed.length > 0) {
     console.log(`  failures (${failed.length}):`);
-    for (const check of failed) console.log(`    [${check.group}] ${check.name}\n      ${check.detail}`);
+    for (const check of failed)
+      console.log(`    [${check.group}] ${check.name}\n      ${check.detail}`);
   }
   console.log(`  receipt: ${receiptPath.pathname}`);
   if (printJson) console.log(JSON.stringify(receipt, null, 2));
@@ -136,6 +198,9 @@ const run = async (): Promise<void> => {
 };
 
 run().catch((error: unknown) => {
-  console.error("board-beads conformance run failed before a report could be written:", error);
+  console.error(
+    "board-beads conformance run failed before a report could be written:",
+    error,
+  );
   process.exit(1);
 });
