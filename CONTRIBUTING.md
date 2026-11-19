@@ -1,5 +1,11 @@
 # Contributing
 
+## Dev setup
+
+- Node ≥ 22.18 and [Bun](https://bun.sh)
+- [`bd`](https://github.com/gastownhall/beads) ≥ 1.3.4, < 2 on PATH — tests drive the real CLI
+- `bun install`
+
 ## Commit convention
 
 [Gitmoji](https://gitmoji.dev/) prefixes:
@@ -20,11 +26,19 @@
 Every change passes:
 
 ```bash
-bun run fmt      # Biome format
-bun run lint     # Biome check
-bun run check    # tsc --noEmit, strict + noUncheckedIndexedAccess
-bun test         # real-bd integration tests (no mocks)
-bun run conformance
+bun run fmt             # format (bun fmt)
+bun run check           # typecheck (bun check)
+bun test                # real-bd integration tests (no mocks)
+bun run verify:platform
+bun run conformance     # non-blocking in CI until the suite fully lands
 ```
 
 Tests run against real disposable beads trackers — never against the operator's tracker, and always with an isolated `HOME`.
+
+## Pull requests
+
+- Run the gates locally; CI must come back green.
+- Cover behavior changes with focused tests — no mocks.
+- Keep diffs focused; one change per PR.
+- Title starts with a gitmoji.
+- API changes: open an issue first so we can settle the shape before code lands. Pre-1.0, APIs may change freely.
