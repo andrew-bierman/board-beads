@@ -667,6 +667,10 @@ export class BdTransport {
       ...(this.#journal ? { BD_EVENTS_JOURNAL: "1" } : {}),
       ...extraEnv,
     };
+    // BEADS_DIR overrides the cwd pinned below: an ambient value would
+    // silently redirect reads and writes to a different tracker. This
+    // transport's `dir` is the sole source of tracker identity.
+    delete env.BEADS_DIR;
     for (const key of omitEnv) delete env[key];
     return new Promise((resolve) => {
       // Args always travel as argv — spawn never sees a shell, so no
