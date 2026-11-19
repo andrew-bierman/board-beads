@@ -60,7 +60,7 @@ Vercel Board (launched 2026-11-18) coordinates agent fleets through a message-st
 **Storage mapping (bd)**
 
 - R5. Every Board message is one bd issue; thread membership is a native `replies-to` link where the bd CLI supports it (capability-probed at bind), with `bb.parent` metadata fallback; all state survives process restart — only timers may be memory-only.
-- R6. Post/reply/edit/delete/react/label map onto bd issue create/update/delete plus backend-owned metadata; `version` grows on every change, `revision` changes only on edit/delete, and a stale `revision` answers 409 `revision_conflict`.
+- R6. Post/reply/edit/delete/react/label map onto bd issue create/update/delete plus backend-owned metadata; `version` grows on every change, `revision` changes only on edit/delete, and a stale `revision` answers 409 `revision_conflict`. Per-message writes serialize behind the backend's per-issue write gate (KTD13) so concurrent replies, labels, and edits on one message produce exactly one winner and protocol 409 codes (`newer_message`, `label_conflict`, `revision_conflict`) for the losers.
 - R7. Deletes leave tombstones (metadata flag), still readable, never silently gone.
 - R8. Board message labels map to bd labels; the backend's own metadata/label namespace (`bb.*`) never collides with Board's reserved `board.*` namespace, and collisions from callers are rejected.
 - R9. Cursors follow the protocol: message ID doubles as a message cursor, threads page by opaque `older` cursor, the event cursor is the journal sequence, an unreadable cursor answers 400 `invalid_cursor`, and IDs are never used for ordering.
@@ -68,27 +68,28 @@ Vercel Board (launched 2026-11-18) coordinates agent fleets through a message-st
 **Events and the writer contract**
 
 - R10. The events long-poll answers at once when `after` has matches, otherwise waits up to the requested seconds; `board()` serves SSE from it.
-- R11. Journal truncation answers 400 `invalid_cursor` with a re-baseline hint; a never-enabled journal yields an empty feed and a bind-time warning naming the fix (`BD_EVENTS_JOURNAL=1`).
+- R11. Journal truncation answers 400 `invalid_cursor` with a re-baseline hint — bd exposes no floor command, so truncation is detected from the journal's gapless-sequence contract (a first returned seq greater than `since + 1`, or a cursor below the observed floor); a never-enabled journal yields an empty feed and a bind-time warning naming the fix (`BD_EVENTS_JOURNAL=1`).
 - R12. The single-writer contract holds: all mutations flow through board-beads; direct `bd`, `coord`/`beadle`, and git-pull writes are declared out-of-band and unjournaled in the README; an `updated_at` reconciler is deferred, not pretended.
 
 **Tasks**
 
-- R13. All 16 task routes map onto bd: create/batch, claim, renew (`bd heartbeat`), release (`bd unclaim --if-assignee` + two-write reopen), complete/fail (guarded close), block/unblock/reopen/assign/needs/cancel — every fenced write carries `{epoch, token, until}`.
+- R13. All 16 task routes — `tasks`, `createTask`, `createTasks`, `createdTasks`, `claimReadyTask`, `claimTask`, `renewTask`, `releaseTask`, `completeTask`, `failTask`, `blockTask`, `unblockTask`, `reopenTask`, `assignTask`, `setTaskNeeds`, `cancelTask` — map onto bd: create/batch, claim, renew (`bd heartbeat`), release (`bd unclaim --if-assignee` + two-write reopen), complete/fail (guarded close), block/unblock/reopen/assign/needs/cancel — every fenced write carries `{epoch, token, until}`.
 - R14. `claimReadyTask` long-polls up to the protocol wait (≤300s), applies the assignment priority (assigned-to-you → own unassigned → `from` owners by ID), returns `{ task: null }` on lapse, and converts bd claim races (exit 1 "already claimed by", exit 13) into 409 `task_claimed` plus a retry of the next candidate inside the same wait.
-- R15. Leases: accepted bounds follow the protocol (default 900s, local()-style caps); the backend heartbeats bd's ~450s TTL at TTL/3 while a Board lease outruns it; Board-side expiry makes the task claimable at once and emits `task.expired`.
+- R15. Leases: accepted bounds follow the protocol (default 900s, local()-style caps); the backend derives bd's lease TTL empirically at bind (claim a fixture issue, measure `lease_expires_at − heartbeat_at`; bd 1.3.4 measures ≈300s) and heartbeats at TTL/3 of the observed value while a Board lease outruns it — no hardcoded TTL constant; Board-side expiry makes the task claimable at once and emits `task.expired`.
 - R16. Completing a dependency readies its waiters in the same write and emits their events.
 
 **Watchers and sync records**
 
 - R17. Watchers: register (≤32 per call), backend-side matching of journal events against compiled tails, 5-minute match leases, and acks — all persisted in bd so a restart loses nothing; URL wake answers 501 `no_wake_by_url`.
-- R18. The 14 sync/inbox/source routes work platform-less as generic records: `syncImport` post/edit/delete round-trips, `syncReceipt`/`syncThread`/`syncFind`/`syncCopies`, `inboxPush`/`inboxNext`/`inboxAck` with once-only lease semantics, `typing`/`readSource`/`joinSource`/`synced`/`linked` answering protocol-correct bodies (conformance drives these with no platform configured).
+- R18. The 14 sync/inbox/source routes — `syncImport`, `syncReceipt`, `syncThread`, `syncFind`, `syncCopies`, `inboxPush`, `inboxNext`, `inboxAck`, `inbox`, `typing`, `readSource`, `joinSource`, `synced`, `linked` — work platform-less as generic records: `syncImport` post/edit/delete round-trips, `syncReceipt`/`syncThread`/`syncFind`/`syncCopies`, `inboxPush`/`inboxNext`/`inboxAck` (plus the `inbox` read) with once-only lease semantics, `typing`/`readSource`/`joinSource`/`synced`/`linked` answering protocol-correct bodies (conformance drives these with no platform configured).
 
 **Product and packaging**
 
-- R19. npm package `board-beads`: root export `beads()`, engines `node >=22.18`, ESM, MIT license.
+- R19. npm package `board-beads`: root export `beads()`, engines `node >=22.18`, ESM, **MPL-2.0 license** (file-level copyleft — anyone may use it anywhere including commercially, but changes to this project's own files must stay open source; amended in-session, user-directed, chosen over MIT for exactly that property).
 - R20. Releases are 0.x versions with small patch/minor bumps; CI publishes on version tags with npm provenance.
 - R21. CI gates every change: Biome format/lint, `tsc --noEmit` strict (+`noUncheckedIndexedAccess`), `bun test` against real bd fixtures (no mocks), and the conformance suite.
-- R22. The README documents quickstart, the bd↔Board mapping table, the single-writer contract, and the bd version policy (`>=1.3.4 <2`, gated at bind; updating bd is sanctioned when capabilities require it), written to be listable both as a Board backend and in beads' community tools.
+- R22. The README documents quickstart, the bd↔Board mapping table, the single-writer contract, and the bd version policy (`>=1.3.4 <2`, gated at bind; updating bd is sanctioned when capabilities require it), written to be listable both as a Board backend and in beads' community tools. The quickstart covers the cold-start prerequisites before the mount — installing bd (and its Dolt requirement), creating the tracker with `bd init`, and installing Board/`vb` — so adopters arriving from Board's backend list are not bounced at step one.
+- R23. Every implemented route honors the verified caller's access per channel, as Board's Backend contract requires ("every method honors what it may do" — `board()` verifies callers and checks grants but the backend filters): readable-only filtering with not-found answers, author-scoped edit/delete, narrowed-caller refusals on watcher registration/acks and sync records, and actors visibility (R23 implements the caller-honoring side of R1; `board()` supplies the verified caller and its `access`).
 
 ### Success Criteria
 
@@ -124,18 +125,19 @@ None blocking. Execution-time unknowns (exact journal payload fields, conformanc
 
 ### Key Technical Decisions
 
-- KTD1. **TypeScript on Bun tooling, targeting Node ≥22.18 ESM.** The `Backend` is a TS object type from `@vercel/board`; Go cannot be that object. Bun runs dev/test (pigeon convention), tsdown builds the publish output, Biome formats/lints, `bun test` runs everything. (session-settled: user-directed — chosen over Golang and vitest/Node tooling: "whats stack? bun ts? or golang?" answered, then "setup proper bun project. use clean types. bun fmt / lint / check".)
+- KTD1. **TypeScript on Bun tooling, targeting Node ≥22.18 ESM.** The `Backend` is a TS object type from `@vercel/board`; Go cannot be that object. Bun runs dev/test (pigeon convention), tsdown builds the publish output. Tooling amended in-session (user-directed): Biome and `tsc` are replaced by Bun-native `bun fmt` + `bun check` (Bun 1.4.4 ships a native formatter and typechecker — "same errors as tsc"); `@biomejs/biome` and `typescript` devDeps dropped; `bun lint` does not exist, so lint folds into format-check plus typecheck. (session-settled: user-directed — chosen over Golang and vitest/Node tooling: "whats stack? bun ts? or golang?" answered, then "setup proper bun project. use clean types. bun fmt / lint / check", then "you won't need biome if you go all in on modern bun".)
 - KTD2. **Name `board-beads` on npm and GitHub; the API export is `beads()`**, mirroring Board's `local()` idiom. (session-settled: user-directed — chosen over `board-backend-beads`: user weighed Vercel's naming pattern twice and kept "ours" for SEO cleanliness.)
 - KTD3. **v1 storage engine is the local `bd` CLI subprocess** (`ShellTransport` pattern); server-authority over `bd serve` is follow-up work. (session-settled: user-approved — chosen over server-first: the events journal is per-invocation and per-replica, so a local engine is the honest v1; the gh-sync question resolved to layered design.)
 - KTD4. **Messages map one-to-one onto bd issues** (message-as-issue); bd comments stay progress notes. Probe evidence: `bd comments` carry only `{id, issue_id, author, text, created_at}` — no edit verbs, no metadata, no `updated_at`, so comments cannot hold version/revision, reactions, labels, or tombstones. Alternative (message-as-comment) rejected on this evidence. The model matches upstream's own convention: beads' mail documentation stores messages _as issues_ threaded by native `replies-to` graph links (`bd show <id> --thread`), so Board threads read as native beads threads. Thread links use the native `replies-to` dep type where the installed CLI supports it (capability-probed), with `bb.parent` metadata fallback; `bd mail` itself is not used — it delegates to an external provider and adds no persistence Board needs.
 - KTD5. **Single-writer contract, no reconciler in 0.1.0** (KTD5 owns R12). Evidence: the journal records only mutations committed through a writer that sets `BD_EVENTS_JOURNAL=1` on the same replica and branch; git-pull'd rows are not journaled.
-- KTD6. **Fencing without bd tokens:** `epoch` = per-issue claim counter in backend metadata, `token` = random string; the backend heartbeats bd's TTL at TTL/3 (lambe cadence) while a Board lease outruns it; claim races are detected from bd exit codes (13 = guarded loss, 1 + "already claimed by" = plain race). Weakness under out-of-band writers documented, not hidden. Alternatives (no fencing; bd serve for real tokens) rejected — the first breaks conformance's `claim_lost` checks, the second is deferred (KTD3).
+- KTD6. **Fencing without bd tokens:** `epoch` = per-issue claim counter in backend metadata, `token` = random string; bd's lease TTL is derived empirically at bind (claim a fixture issue, measure `lease_expires_at − heartbeat_at`; measured ≈300s on bd 1.3.4 — lambe's 450s was its own assumption), and the backend heartbeats at TTL/3 of the observed value while a Board lease outruns it; claim races are detected from bd exit codes (13 = guarded loss — the guarded arm of a claim race, consumed by `claimReadyTask` like exit-1 races per R14; 1 + "already claimed by" = plain race). Weakness under out-of-band writers documented, not hidden. Alternatives (no fencing; bd serve for real tokens) rejected — the first breaks conformance's `claim_lost` checks, the second is deferred (KTD3).
 - KTD7. **v0.1.0 implements tasks and 501s exactly: search, schedules, grants, schemas, attachments** (+ `no_wake_by_url`, `no_direct_uploads`). Conformance's OPTIONAL set is `{search, schedules, tasks, grants, schemas, attachments}`; watchers and sync are unskippable and implemented; the schema check has a verified clean skip path, so schemas stay out of 0.1.0 and land as a cheap minor. (session-settled: user-approved — chosen over 501-ing tasks first: conformance-legal but guts the product; walking-skeleton order keeps the speed.)
 - KTD8. **0.x release policy: `0.1.0` first, small bumps after merge, no 1.0.** (session-settled: user-directed — chosen over a 1.0 launch: "do not ship a v1 yet. small minor / patch versions pls.")
 - KTD9. **Gitmoji commit convention** (`✨ feat:`, `🐛 fix:`, `✅ test:`, `🔧 chore:`, `🔖 chore(release): vX.Y.Z`). (session-settled: user-directed — chosen over plain conventional commits.)
 - KTD10. **Tests run against real bd** — each suite builds a disposable tracker (`bd init` in a temp dir with isolated `HOME`, since `bd init` installs hook files) and exercises real claim/comment/event flows; the conformance suite is a merge gate. No mocks. (session-settled: user-directed — "strong test coverage (no mocks ideally)".)
 - KTD11. **Identity: Board principals map bijectively to `BEADS_ACTOR` slugs**, persisted in backend metadata so fencing (`--if-assignee`) stays stable across restarts. Collisions answer a 4xx at write time, not silently.
-- KTD12. **Units are speed-ordered as a walking skeleton** — transport and model before routes, conformance harness before polish — and parallelizable units (U2∥U3, then U4/U5/U6/U7 across agents) say so on their faces. (session-settled: user-directed — "being first mover is everything… get tons of subagents… go super fast".)
+- KTD12. **Units are speed-ordered as a walking skeleton** — transport and model before routes, conformance harness before polish — with the dependency-real parallel shape: U2∥U3 first, then U4∥U5; U6 and U7 additionally gate on U5 (their non-event scaffolding may start early; event-dependent scenarios gate on U5). (session-settled: user-directed — "being first mover is everything… get tons of subagents… go super fast".)
+- KTD13. **Per-issue in-process write gate.** Conformance races concurrent replies, labels, and edits on one message and requires exactly one winner with exact 409 codes; each write is a bd read-modify-write of one metadata JSON field, so the backend serializes an issue's metadata read-modify-write behind an in-process mutex keyed by issue ID — the single-writer process arbitrates caller races — and race losers answer `newer_message` / `label_conflict` / `revision_conflict` per the protocol. Alternative (bd-level compare-and-set) rejected: bd has no metadata CAS; the gate is the smallest mechanism that closes the gap.
 
 ### Assumptions
 
@@ -181,14 +183,14 @@ sequenceDiagram
   participant B as backend
   participant BD as bd
   A->>B: POST /tasks/claim {wait:300}
-  loop every ~1s until wait elapses
+  loop journal-wake (U5 poller on task-relevant ops) + 30s safety re-poll
     B->>BD: bd list --ready --label ... (batched read)
     BD-->>B: candidates
     B->>BD: bd update <id> --claim (BEADS_ACTOR=A)
     alt won
       BD-->>B: ok
       B-->>A: {task, claim:{epoch,token,until}}
-    else exit 1 "already claimed by"
+    else exit 13 (lost guard) or exit 1 "already claimed by"
       BD-->>B: race
       B->>B: next candidate (409 recorded, retry)
     end
@@ -219,6 +221,7 @@ Greenfield repo; the layout is a design commitment (one transport seam, one mode
 ```
 board-beads/
 ├── package.json / tsconfig.json / tsconfig.strict.json / biome.json / tsdown.config.ts
+├── README.md / LICENSE / CONTRIBUTING.md / CHANGELOG.md
 ├── .github/workflows/{ci,release}.yml
 ├── src/
 │   ├── backend.ts          # route registry + 501 table (KTD7)
@@ -228,10 +231,10 @@ board-beads/
 │   ├── events/             # U5: journal poller
 │   ├── tasks/              # U6: lease timers
 │   └── state/              # U7: persisted watcher/inbox/actor state
-├── scripts/conformance.ts  # U8 harness
+├── scripts/                # conformance.ts (U8), demo.ts (S2, U8), verify-platform.ts (U1)
 ├── test/helpers/bd-fixture.ts
 ├── evidence/               # conformance receipts
-└── docs/mapping.md
+└── docs/                   # mapping.md, research/landscape-2026-11-19.md, plans/
 ```
 
 ---
@@ -240,7 +243,7 @@ board-beads/
 
 ### PR1: board-beads 0.1.0 — conformance-green Board backend on beads
 
-All units ship in this PR; U1–U3 unblock the rest, U4–U7 parallelize across agents once U2 and U3 land, U8 closes.
+All units ship in this PR: U1–U3 first, U4∥U5 next, U6 and U7 once U5 lands (event-dependent scenarios gate on U5), U8 closes.
 
 ### U1. Bun project scaffold, tooling, CI, npm wiring
 
@@ -253,7 +256,7 @@ All units ship in this PR; U1–U3 unblock the rest, U4–U7 parallelize across 
   2. Scripts: `fmt`/`lint` (Biome), `check` (`tsc --noEmit -p tsconfig.strict.json`), `test` (`bun test`), `conformance`.
   3. Verify Bun resolves `@vercel/board`'s `node` condition in-process (import `board` + `conformance`, mount a stub backend). If it fails, switch tests to vitest-on-Node and record the switch in the PR body — decision by evidence, same day.
   4. Test fixture helper: temp dir + isolated `HOME` + `bd init` + version assert; used by every later unit.
-  5. CI: check + lint + test + conformance on Node 22 and Bun; release workflow publishes on `v*` tags with `npm publish --provenance`.
+  5. CI: check + lint on both Node 22 and Bun; test + conformance run under Bun only (KTD1) — a Node 22 leg adds tests back solely if U1 step 3's vitest fallback triggers; release workflow publishes on `v*` tags with `npm publish --provenance`.
 - **Patterns to follow:** pigeon's `package.json`/`biome.json`/`tsconfig.strict.json` trio; tsdown config from `@vercel/board` itself.
 - **Test scenarios:**
   - Fixture helper boots `bd init` in a temp HOME and reports a parsed version ≥1.3.4 <2.
@@ -272,7 +275,8 @@ All units ship in this PR; U1–U3 unblock the rest, U4–U7 parallelize across 
   1. Mirror lambe `ShellTransport`: per-call subprocess with timeout and `WaitDelay`-style kill, env `BD_JSON_ENVELOPE=1` + `BEADS_ACTOR`, envelope unwrap tolerating non-envelope bytes.
   2. Error classes from bd's exit contract: 13 → lost-guard, 14 → retry-later freeze, 1 + "already claimed by" → claim race, 1 + heartbeat-loss text → not-holder; everything else → transport error wrapped as `HttpError(500, "internal")` at the route layer, never raw.
   3. `bd batch -f <file> --json` writer for close/update/create/dep ops (grammar limits documented in-code); single-op paths for claims/heartbeats/reads.
-  4. `bd events tail --since <seq> --json` under `BD_EVENTS_JOURNAL=1`, returning `{events, head, floor}`; truncation and never-enabled states as typed results.
+  4. `bd events tail --since <seq> --json` under `BD_EVENTS_JOURNAL=1` — emits bare journal records (`{seq, ts, op, issue_id, actor, issue}` per record; no envelope); truncation is detected from the gapless-seq contract (first returned seq greater than `since + 1`), and the never-enabled state is a typed result.
+  5. Probe `bd update --metadata` merge semantics in the fixture (merge vs whole-blob replace) before any unit leans on it; the transport API exposes whichever semantics bd has (whole-blob replace makes every metadata write a read-modify-write — the surface KTD13's gate covers).
   5. `bd --version` parse + capability record.
 - **Patterns to follow:** lambe `internal/tracker/shell.go` and `beads.go` exit classification; beadle's dual-shape tolerant parsing.
 - **Test scenarios (real bd):**
@@ -285,8 +289,8 @@ All units ship in this PR; U1–U3 unblock the rest, U4–U7 parallelize across 
 
 ### U3. Domain model: issue↔message mapping, metadata, cursors, actors
 
-- **Goal:** The mapping decisions (KTD4–KTD6, KTD11) exist as typed, tested functions before any route uses them.
-- **Requirements:** R5–R9, R12; KTD4, KTD5, KTD6, KTD11.
+- **Goal:** The mapping decisions (KTD4–KTD6, KTD11, KTD13) exist as typed, tested functions before any route uses them.
+- **Requirements:** R5–R9, R12; KTD4, KTD5, KTD6, KTD11, KTD13.
 - **Dependencies:** U1 (parallel with U2).
 - **Files:** `src/model/types.ts`, `src/model/metadata.ts`, `src/model/message.ts`, `src/model/cursors.ts`, `src/model/actors.ts`, `src/model/labels.ts`, colocated `*.test.ts`.
 - **Approach:**
@@ -296,6 +300,7 @@ All units ship in this PR; U1–U3 unblock the rest, U4–U7 parallelize across 
   4. Thread links: probe `bd dep add <new> <old> --type replies-to` against the fixture; use the native link when supported, `bb.parent` metadata fallback otherwise — the capability flag comes from U2's version probe, never a hardcoded version guess.
   5. Actor map: principal → slug (deterministic, collision-checked), persisted via a backend-metadata issue so restarts keep fencing stable.
   6. Label namespaces: `bb.*` ours, Board's `board.*` rejected as caller input (400 `reserved_label` parity).
+  7. Per-issue write gate primitive (KTD13): an in-process mutex keyed by issue ID serializing metadata read-modify-write; routes acquire it around every metadata write.
 - **Patterns to follow:** pigeon's metadata discipline; Board's `IDs and cursors` rules verbatim.
 - **Test scenarios (pure + fixture):**
   - version/revision matrix: create → 1/1; edit → version+1, revision+1; react → version+1, revision same; stale revision write → conflict result object.
@@ -305,7 +310,7 @@ All units ship in this PR; U1–U3 unblock the rest, U4–U7 parallelize across 
   - Namespace guard: `board.*` caller label rejected; `bb.*` never emitted to callers.
 - **Verification:** `bun test src/model` green; every route-layer unit imports only from `src/model` for mapping.
 
-### U4. Threads and messages routes (15 methods)
+### U4. Threads and messages routes (14 methods)
 
 - **Goal:** Board's core conversation surface works end-to-end on the tracker.
 - **Requirements:** R1, R4, R5–R9; KTD4.
@@ -315,6 +320,7 @@ All units ship in this PR; U1–U3 unblock the rest, U4–U7 parallelize across 
   1. Implement discovery, me, channels, createChannel, actors, channelMessages, threads, message, posted, post, edit, delete, react, label against the model layer.
   2. Channels = bd labels (per KTD4 mapping table); threads = parent-linked issues; listing honors paging cursors from U3.
   3. Tombstones on delete; `revision_conflict` on stale edits; reactions/labels as metadata/label writes; `posted` idempotency by ID.
+  4. Honor the verified caller's access per channel (R23): readable-only filtering with not-found answers, author-scoped edit/delete, caller-narrowed reactions/labels — per `caller.identity.principal.access` (the access doc; `local()` filters reads this way in its own layer).
 - **Patterns to follow:** `local()`/a2 method shapes from Board's source; conformance `core` check list.
 - **Test scenarios (real bd):**
   - Post a root message and a reply; `threads` returns the thread with both, paging via `older`.
@@ -322,8 +328,10 @@ All units ship in this PR; U1–U3 unblock the rest, U4–U7 parallelize across 
   - Delete → tombstone visible on read; second delete → protocol-correct already-deleted answer.
   - Label add/remove round-trips; `board.*` input rejected; label filter listing works.
   - A Board thread reads correctly through beads' native thread view (`bd show <id> --thread`) — the ecosystem-credibility check (KTD4).
+  - Concurrency (KTD13): three concurrent edits/labels/replies on one message — exactly one winner; losers carry exact 409 codes (`newer_message` / `label_conflict` / `revision_conflict`).
+  - Narrowed caller (R23): a caller with `can` narrowed off a channel reads not-found there and cannot edit another author's message.
   - Restart the backend process mid-suite: all messages and threads still read (persistence proof, R5).
-- **Verification:** route tests green; the conformance `core` failure list shrinks to known-pending items only.
+- **Verification:** route tests green; conformance `core` failures at this checkpoint come only from checks awaiting U5–U7 surfaces; once all units land, `core` reports `ok` per R2.
 
 ### U5. Events long-poll and journal consumer
 
@@ -334,7 +342,7 @@ All units ship in this PR; U1–U3 unblock the rest, U4–U7 parallelize across 
 - **Approach:**
   1. Long-poll loop: answer immediately when journal seq > `after`, else re-tail on a short cadence until `wait` expires (query max 300s honored).
   2. Map journal ops (`create|update|close|delete|dep_add|dep_remove|comment`) to Board event shapes via the model layer; enrich with message fields where the journal row carries them.
-  3. Truncation (seq below floor) → 400 `invalid_cursor` + hint; journal disabled → empty feed + bind-time warning (U8 wires the warning surface).
+  3. Truncation via the gapless-seq contract (first returned seq greater than `since + 1`) → 400 `invalid_cursor` + hint; journal disabled → empty feed + bind-time warning emitted here (R11 owns it; stays in this unit).
 - **Test scenarios (real bd):**
   - Write through the backend, poll with `after=0`: event arrives immediately with correct seq ordering.
   - Long-poll with no writes returns `{events: []}` after the wait; a concurrent write releases the waiter early.
@@ -345,13 +353,14 @@ All units ship in this PR; U1–U3 unblock the rest, U4–U7 parallelize across 
 ### U6. Tasks (16 methods) with fencing and the claim long-poll
 
 - **Goal:** The differentiator — Board's task surface over bd claims/leases, the part no other backend can copy quickly.
-- **Requirements:** R13–R16; KTD6, KTD7, KTD11.
+- **Requirements:** R13–R16, R23; KTD6, KTD7, KTD11, KTD13.
 - **Dependencies:** U2, U3, U5 (events for `task.expired`).
 - **Files:** `src/routes/tasks.ts`, `src/tasks/leases.ts`, `src/routes/tasks.test.ts`.
 - **Approach:**
-  1. Full verb mapping per R13; batch create (1–100, key refs, cycle check) maps to `bd batch` create/dep ops (grammar-compatible slice); claim/renew/release stay single-op.
-  2. Fencing: epoch = per-issue claim counter (metadata), token = random; renew = heartbeat + until extension with TTL/3 timer while Board lease > bd TTL; expiry check on read emits `task.expired` and flips claimable.
-  3. `claimReadyTask`: candidate scan honoring assignment priority and label filters, single-flight claim attempts per candidate, race → next candidate within the wait (F1), `{task: null}` on lapse; `wait` capped at 300s.
+  1. Full verb mapping per R13; batch create (1–100, key refs, cycle check) maps to `bd batch` create+dep lines only — its grammar takes type/priority/title with no description or labels — so task text and channel labels ride per-task single-op writes after the atomic create+deps batch; invalid batches (bad key, duplicate key, cycle, canceled need) are pre-validated before any write so "makes none of its tasks" holds; claim/renew/release stay single-op.
+  2. Fencing: epoch = per-issue claim counter (metadata), token = random; renew = heartbeat + until extension with the heartbeat timer at TTL/3 of the bind-probed TTL while a Board lease outruns it; expiry check on read emits `task.expired` and flips claimable.
+  3. `claimReadyTask`: candidate scan woken by the U5 journal poller on task-relevant ops (create/update/close/dep_add/dep_remove) with a slow (30s) safety re-poll for out-of-band writes — no fixed 1s `bd list` cadence; assignment priority and label filters per protocol; single-flight claim attempts per candidate; race (exit 13 lost-guard or exit 1 "already claimed by") → next candidate within the wait (F1); `{task: null}` on lapse; `wait` capped at 300s.
+  4. Honor the verified caller's access per channel (R23): task reads filter by caller readability; owner-or-`manage` checks for block/unblock/reopen/assign/needs/cancel answer 403 `task_not_owned` to narrowed callers.
   4. `needs` replacement with cycle walk (≤500), completion readies waiters in the same write and emits their events.
 - **Patterns to follow:** beadle's claim/unclaim/two-write reopen; lambe's heartbeat cadence; Board's tasks doc for exact 409 codes.
 - **Test scenarios (real bd):**
@@ -361,18 +370,21 @@ All units ship in this PR; U1–U3 unblock the rest, U4–U7 parallelize across 
   - Long-poll returns the claimed task within the wait when a second writer (through the backend) readies a task mid-poll; `{task: null}` on quiet lapse.
   - Release = two-write reopen proof (assignee actually cleared); expiry path flips claimable + emits `task.expired`.
   - Block/unblock/reopen/assign/needs/cancel each round-trip with their 409 codes on wrong-state input.
+  - Batch create with a duplicate or cycling key → 409 and no tasks exist afterward (two-phase mapping's pre-validation proof).
+  - Narrowed caller: a non-owner's block/unblock/assign answers 403 `task_not_owned` (R23).
 - **Verification:** tasks tests green; conformance `tasks` group failing-check list empties in the U8 harness.
 
 ### U7. Watchers (4) + sync/inbox/source records (14)
 
 - **Goal:** The two unskippable conformance groups, platform-less.
-- **Requirements:** R17, R18; KTD5, KTD7.
+- **Requirements:** R17, R18, R23; KTD5, KTD7.
 - **Dependencies:** U2, U3, U5 (parallel with U4/U6).
 - **Files:** `src/routes/watchers.ts`, `src/routes/sync.ts`, `src/state/persisted.ts`, colocated tests.
 - **Approach:**
   1. Watchers: register stores compiled tails (≤32 per call); the events consumer (U5) runs matches backend-side, leasing each match 5 minutes in persisted state (bd state issues via U3 metadata); ack clears the lease; `url` wake → 501 `no_wake_by_url` with local()-parity body.
   2. Sync records: syncImport post/edit/delete writes messages with external refs (`from` key, origin) in metadata; syncReceipt/syncThread/syncFind/syncCopies round-trip those refs; no platform adapters exist, by design.
   3. Inbox: push appends items (dedupe by event id), next leases items once (previous ack required per conformance's queue check), ack clears; typing/readSource/joinSource/synced/linked answer the protocol-correct minimal bodies drawn from the conformance source, not invented ones.
+  4. Honor the verified caller's access per channel (R23): watcher registration/acks and sync records answer narrowed callers with protocol refusals; inbox/typing/source routes filter by caller readability.
 - **Patterns to follow:** conformance source's own sync checks (`src/conformance/index.ts` group `sync`); Board's watchers doc run/retry semantics.
 - **Test scenarios (real bd):**
   - Register → matching event → match appears leased → ack clears; restart mid-lease: lease and registration survive (persistence proof).
@@ -386,12 +398,15 @@ All units ship in this PR; U1–U3 unblock the rest, U4–U7 parallelize across 
 - **Goal:** The done-bar executes in CI and the package ships.
 - **Requirements:** R2, R3, R20–R22; KTD7, KTD8, KTD9, KTD10.
 - **Dependencies:** U4–U7.
-- **Files:** `scripts/conformance.ts`, `src/backend.ts` (501 table), `README.md` (full), `docs/mapping.md`, `evidence/conformance-0.1.0.json`, `.github/workflows/release.yml` (finalized), `CHANGELOG.md`.
+- **Files:** `scripts/conformance.ts`, `scripts/demo.ts`, `src/backend.ts` (501 table), `README.md` (full), `docs/mapping.md`, `docs/research/landscape-2026-11-19.md`, `evidence/conformance-0.1.0.json`, `.github/workflows/release.yml` (finalized), `CHANGELOG.md`.
 - **Approach:**
   1. `bun run conformance` mounts `conformance(board({ backend: beads({dir: fixture}) }))`, writes the machine receipt (groups/skips/counts) to `evidence/` (pigeon pattern); CI fails on any non-skip failure.
   2. The 501 table (KTD7) lives in one exported record; codes and hint strings match `local()`'s verified bodies.
   3. README: quickstart (`bun i board-beads` → mount → `vb serve`), mapping table, single-writer contract, bd version policy, limitations; open the two community-listing PRs (beads `docs/community-tools.md`, Board backend listing) with the release.
   4. Tag `v0.1.0` → provenance publish → S3 receipt; CHANGELOG starts the bump cadence (KTD8).
+  5. Harness drives the header-gated conformance checks: mount the served board with an `authenticate` verifier and pass `withHeaders`/`withCan` so narrowing, profile-scoped edits, and watcher/inbox refusals are proven, not skipped (R23; the plain in-process run skips them).
+  6. `scripts/demo.ts` (S2): two `vb` agents claim and complete tasks while a third agent's watcher wakes on a reply — fixture tracker, README instructions only.
+  7. README quickstart covers the cold-start prerequisites (install bd + its Dolt requirement, `bd init`, install Board/`vb`) before the mount; the docs smoke executes them verbatim from an uninitialized temp dir; commit the adapter-landscape search log as `docs/research/landscape-2026-11-19.md` (the Problem Frame's first-mover evidence, made durable); the operator opens the two community-listing PRs (announce duty, Goal Capsule).
 - **Patterns to follow:** pigeon's `evidence/*.json` receipt; gitmoji release tag `🔖 chore(release): v0.1.0`.
 - **Test scenarios:**
   - Harness runs conformance in-process on a fixture tracker and writes a parseable receipt; a planted route failure turns the run red (gate proven).
@@ -409,7 +424,7 @@ All units ship in this PR; U1–U3 unblock the rest, U4–U7 parallelize across 
 | Format/lint      | `bun run fmt && bun run lint` (Biome)                                | every change                | zero findings                                                |
 | Types            | `bun run check` (`tsc --noEmit` strict + `noUncheckedIndexedAccess`) | every change                | zero errors                                                  |
 | Unit/integration | `bun test`                                                           | every change                | green against real bd fixtures; no mocks                     |
-| Conformance      | `bun run conformance`                                                | every change; release block | `ok` on core/paging/tasks/watchers/sync; skips only per KTD7 |
+| Conformance      | `bun run conformance`                                                | every change; release block | `ok` on core/paging/tasks/watchers/sync; skips only per KTD7; harness drives the header-gated checks (`withCan`/`withHeaders`, R23) |
 | Release          | tag `vX.Y.Z` → release workflow                                      | release                     | npm publish with provenance; receipt updated                 |
 
 The bd fixture (U1) is the only sanctioned way tests touch beads; tests never target the operator's real tracker and always isolate `HOME`.
