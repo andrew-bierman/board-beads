@@ -1,0 +1,58 @@
+{
+	"name": "board-beads",
+	"version": "0.1.0",
+	"description": "Run Vercel Board on beads — a Board Backend backed by your beads tracker (bd).",
+	"type": "module",
+	"license": "MIT",
+	"author": "Andrew Bierman",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/andrew-bierman/board-beads.git"
+	},
+	"keywords": [
+		"beads",
+		"bd",
+		"vercel-board",
+		"vercel",
+		"board",
+		"backend",
+		"ai-agents",
+		"agent-orchestration",
+		"coding-agents"
+	],
+	"engines": {
+		"node": ">=22.18"
+	},
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		},
+		"./package.json": "./package.json"
+	},
+	"files": [
+		"dist",
+		"README.md",
+		"LICENSE"
+	],
+	"scripts": {
+		"fmt": "biome format --write .",
+		"lint": "biome check .",
+		"check": "tsc --noEmit -p tsconfig.strict.json",
+		"test": "bun test",
+		"conformance": "bun run scripts/conformance.ts",
+		"verify:platform": "bun run scripts/verify-platform.ts",
+		"build": "tsdown",
+		"prepublishOnly": "bun run check && bun test && bun run build"
+	},
+	"dependencies": {
+		"@vercel/board": "^0.53.0"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.6.8",
+		"@types/bun": "^1.4.4",
+		"@types/node": "^26.6.6",
+		"tsdown": "^0.23.7",
+		"typescript": "^7.0.2"
+	}
+}

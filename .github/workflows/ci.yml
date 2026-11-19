@@ -1,0 +1,43 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+
+      # bd CLI for the real-tracker test fixtures (plan unit U1).
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Install bd
+        run: go install github.com/gastownhall/beads/cmd/bd@v1.3.4
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Format check
+        run: bun run lint
+
+      - name: Typecheck
+        run: bun run check
+
+      - name: Tests (real bd, no mocks)
+        run: bun test
+
+      # Platform check: Bun must resolve @vercel/board's node export condition (U1 decision point).
+      - name: Platform check
+        run: bun run verify:platform
+
+      # conformance lands in plan unit U8; keep the step visible but non-blocking until then.
+      - name: Conformance suite
+        run: bun run conformance
+        continue-on-error: true
