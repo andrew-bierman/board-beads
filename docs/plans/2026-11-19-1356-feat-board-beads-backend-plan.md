@@ -417,17 +417,37 @@ All units ship in this PR: U1–U3 first, U4∥U5 next, U6 and U7 once U5 lands 
   - Test expectation for the npm publish itself: none — proven by the tag run (S3).
 - **Verification:** CI green end-to-end; receipt committed; S1 and S2 demonstrated; release tagged and published.
 
+### U9. Hardening sweep — failure modes, corrupt state, limits
+
+- **Goal:** Every failure mode a real user hits produces a typed, documented outcome; hostile or corrupt state never crashes the backend, corrupts the tracker, or silently degrades.
+- **Requirements:** R4, R5–R12, R24; KTD13, KTD15.
+- **Dependencies:** U4–U7.
+- **Files:** `test/failure-modes.test.ts`, plus hardening fixes surfaced by it across `src/**` (each fix lands in the unit that owns the file).
+- **Approach:**
+  1. Corrupt-state fixtures: an issue with unparseable metadata, an issue missing expected metadata, a foreign issue created by plain `bd` outside the backend — reads serve what they can with typed corrupt/not-found results; unrelated issues keep serving; writes to corrupt issues answer typed errors.
+  2. Environment failures: `bd` missing from PATH, garbage `bd --version` output, tracker dir without `.beads` → bind-time typed errors naming the fix (version gate, `bd init`).
+  3. Hung subprocess: a bd invocation exceeding its timeout is killed (tree-kill) and surfaces as a typed transport error; the tracker is unchanged (bd transactionality proof via a killed-mid-write restart).
+  4. Limits and hostile input: 10k-char message root, oversized metadata, unicode/emoji/CJK round-trips, actor slugs from hostile principals (spaces/unicode) — sanitized bijectively or rejected, per protocol limits.
+  5. Concurrent processes: two backend instances on one tracker — the single-writer contract is enforced with a documented bind-time detection (lock or journal-head check), not silent corruption.
+- **Patterns to follow:** bd's own gate-file locking for the concurrency detector; pigeon's fail-closed credential split for actionable error messages.
+- **Test scenarios:**
+  - The sweep runs every route with hostile inputs and asserts no route answers 500 `internal` (each answers its typed 4xx or a documented error result).
+  - Kill-restart: kill the backend process mid-write; restart; acknowledged writes survived, unacknowledged writes either completed atomically or are absent (bd transactionality), and the tracker serves.
+  - Corrupt metadata: the affected message answers typed corrupt/not-found; a fresh post-corruption write to a DIFFERENT message succeeds.
+- **Verification:** `bun test test/failure-modes.test.ts` green; the sweep is added to CI as a required step.
+
 ---
 
 ## Verification Contract
 
-| Gate             | Command                               | Applies to                  | Done signal                                                                                                                         |
-| ---------------- | ------------------------------------- | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| Format/lint      | `bun run fmt && bun run lint` (Biome) | every change                | zero findings                                                                                                                       |
-| Types            | `bun run check` (`bun check`)         | every change                | zero errors                                                                                                                         |
-| Unit/integration | `bun test`                            | every change                | green against real bd fixtures; no mocks                                                                                            |
-| Conformance      | `bun run conformance`                 | every change; release block | `ok` on core/paging/tasks/watchers/sync; skips only per KTD7; harness drives the header-gated checks (`withCan`/`withHeaders`, R23) |
-| Release          | tag `vX.Y.Z` → release workflow       | release                     | npm publish with provenance; receipt updated                                                                                        |
+| Gate             | Command                                                                            | Applies to                  | Done signal                                                                                                                         |
+| ---------------- | ---------------------------------------------------------------------------------- | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| Format           | `bun fmt --check` (native Bun formatter)                                           | every change                | zero findings                                                                                                                       |
+| Types            | `bun check` (native typechecker, strict + `noUncheckedIndexedAccess` via tsconfig) | every change                | zero errors                                                                                                                         |
+| Unit/integration | `bun test`                                                                         | every change                | green against real bd fixtures; no mocks                                                                                            |
+| Failure modes    | `bun test test/failure-modes.test.ts`                                              | release block               | sweep green; no route answers 500 `internal` under hostile inputs (R24)                                                             |
+| Conformance      | `bun run conformance`                                                              | every change; release block | `ok` on core/paging/tasks/watchers/sync; skips only per KTD7; harness drives the header-gated checks (`withCan`/`withHeaders`, R23) |
+| Release          | tag `vX.Y.Z` → release workflow                                                    | release                     | npm publish with provenance; receipt updated                                                                                        |
 
 The bd fixture (U1) is the only sanctioned way tests touch beads; tests never target the operator's real tracker and always isolate `HOME`.
 
