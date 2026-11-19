@@ -3,15 +3,42 @@ on:
   push:
     tags: ["v*"]
 
+# Re-pointing a tag cancels the stale run instead of racing it.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 jobs:
+  # ~10s. Fails fast — before the full CI matrix runs — on versions that
+  # cannot publish: non-0.x, tag/version mismatch, or registry conflict.
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version gate
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          case "$version" in
+            0.*) ;;
+            *) echo "⛔ Sub-v1 only: refusing to publish $version" >&2; exit 1 ;;
+          esac
+          if [[ "v$version" != "${GITHUB_REF_NAME}" ]]; then
+            echo "⛔ Tag ${GITHUB_REF_NAME} != package.json v$version" >&2; exit 1
+          fi
+          if npm view "board-beads@$version" version >/dev/null 2>&1; then
+            echo "⛔ board-beads@$version is already published — bump the version first" >&2; exit 1
+          fi
+          echo "✓ v$version is free and matches the tag"
+
   verify:
+    needs: gate
     uses: ./.github/workflows/ci.yml
 
   publish:
-    needs: verify
+    needs: [gate, verify]
     permissions:
       contents: read
       id-token: write # npm provenance
