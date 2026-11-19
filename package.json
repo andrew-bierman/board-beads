@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Run Vercel Board on beads \u2014 a Board Backend backed by your beads tracker (bd).",
   "type": "module",
-  "license": "MIT",
+  "license": "MPL-2.0",
   "author": "Andrew Bierman",
   "repository": {
     "type": "git",
