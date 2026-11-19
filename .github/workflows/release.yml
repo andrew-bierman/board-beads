@@ -17,13 +17,26 @@ jobs:
         with:
           bun-version: 1.4.4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version: '24' # bundles npm 11.x — trusted publishing requires npm >= 11.5.1
           registry-url: https://registry.npmjs.org
+          package-manager-cache: false # never use caching in release builds
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
+
+      - name: Verify tag matches package.json version (sub-v1 only)
+        run: |
+          PKG_VERSION="v$(node -p "require('./package.json').version")"
+          case "$PKG_VERSION" in
+            v0.*) ;;
+            *) echo "Sub-v1 only: refusing to publish $PKG_VERSION" >&2; exit 1 ;;
+          esac
+          if [[ "$PKG_VERSION" != "${GITHUB_REF_NAME}" ]]; then
+            echo "Tag ${GITHUB_REF_NAME} != package.json ${PKG_VERSION}" >&2
+            exit 1
+          fi
 
       - name: Typecheck
         run: bun run check
@@ -34,7 +47,5 @@ jobs:
       - name: Build
         run: bun run build
 
-      - name: Publish (npm provenance)
+      - name: Publish (npm provenance, trusted publishing — no token)
         run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
