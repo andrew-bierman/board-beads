@@ -5,10 +5,16 @@ on:
 
 permissions:
   contents: read
-  id-token: write # npm provenance
 
 jobs:
+  verify:
+    uses: ./.github/workflows/ci.yml
+
   publish:
+    needs: verify
+    permissions:
+      contents: read
+      id-token: write # npm provenance
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,40 +25,28 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: '24' # bundles npm 11.x — trusted publishing requires npm >= 11.5.1
+          node-version: 24 # npm trusted publishing requires npm >= 11.5.1
           registry-url: https://registry.npmjs.org
-          package-manager-cache: false # never use caching in release builds
-
-      - name: Install bd (official release binary — embedded Dolt included)
-        run: |
-          curl -fsSL https://github.com/steveyegge/beads/releases/download/v1.3.4/beads_1.3.4_linux_amd64.tar.gz -o /tmp/bd.tgz
-          tar -xzf /tmp/bd.tgz -C /tmp
-          sudo install /tmp/bd /usr/local/bin/bd
-          bd --version
+          package-manager-cache: false
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Verify tag matches package.json version (sub-v1 only)
+      - name: Verify tag matches package version (sub-v1 only)
+        id: version
         run: |
-          PKG_VERSION="v$(node -p "require('./package.json').version")"
-          case "$PKG_VERSION" in
-            v0.*) ;;
-            *) echo "Sub-v1 only: refusing to publish $PKG_VERSION" >&2; exit 1 ;;
-          esac
-          if [[ "$PKG_VERSION" != "${GITHUB_REF_NAME}" ]]; then
-            echo "Tag ${GITHUB_REF_NAME} != package.json ${PKG_VERSION}" >&2
+          version="v$(node -p "require('./package.json').version")"
+          if [[ "$version" != v0.* || "$version" != "$GITHUB_REF_NAME" ]]; then
+            echo "Expected a matching 0.x release tag, got $GITHUB_REF_NAME for $version" >&2
             exit 1
           fi
-
-      - name: Typecheck
-        run: bun run check
-
-      - name: Test
-        run: bun test
+          case "$version" in
+            *-*) echo "channel=next" >> "$GITHUB_OUTPUT" ;;
+            *) echo "channel=latest" >> "$GITHUB_OUTPUT" ;;
+          esac
 
       - name: Build
         run: bun run build
 
-      - name: Publish (npm provenance, trusted publishing — no token)
-        run: npm publish --provenance --access public
+      - name: Publish (npm provenance)
+        run: npm publish --ignore-scripts --provenance --access public --tag "${{ steps.version.outputs.channel }}"

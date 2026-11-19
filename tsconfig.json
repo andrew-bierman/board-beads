@@ -1,15 +1,15 @@
 {
-	"compilerOptions": {
-		"target": "ESNext",
-		"module": "ESNext",
-		"moduleResolution": "Bundler",
-		"strict": true,
-		"skipLibCheck": true,
-		"noEmit": true,
-		"declaration": true,
-		"isolatedDeclarations": true,
-		"allowImportingTsExtensions": true,
-		"types": ["@types/bun"]
-	},
-	"include": ["src", "scripts", "test"]
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "declaration": true,
+    "isolatedDeclarations": true,
+    "allowImportingTsExtensions": true,
+    "types": ["@types/bun"]
+  },
+  "include": ["src", "scripts", "test"]
 }

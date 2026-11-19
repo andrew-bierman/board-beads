@@ -3,7 +3,6 @@ name: Bug report
 about: Something misbehaves against a real beads tracker
 title: "bug: "
 labels: bug
-
 ---
 
 <!-- Title starts with 🐛 (gitmoji convention) — e.g. "🐛 fix: task claim race returns 500 instead of 409" -->
