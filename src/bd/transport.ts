@@ -372,13 +372,15 @@ function parseJournalRecords(command: string, raw: string): BdJournalRecord[] {
     }
     const row = asRecord(parsed);
     if (!row) {
-      throw corrupt(command, `unparseable journal record: ${text.slice(0, 200)}`);
+      throw corrupt(
+        command,
+        `unparseable journal record: ${text.slice(0, 200)}`,
+      );
     }
     const seq = typeof row.seq === "number" ? row.seq : null;
     const ts = typeof row.ts === "string" ? row.ts : null;
     const op = typeof row.op === "string" ? row.op : null;
-    const issueId =
-      typeof row.issue_id === "string" ? row.issue_id : null;
+    const issueId = typeof row.issue_id === "string" ? row.issue_id : null;
     const actor = typeof row.actor === "string" ? row.actor : "";
     if (seq === null || ts === null || op === null || issueId === null) {
       throw corrupt(
