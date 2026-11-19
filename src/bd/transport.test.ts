@@ -1,5 +1,11 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -220,7 +226,11 @@ describe("bd transport (real bd)", () => {
     chmodSync(garbageBin, 0o700);
     chmodSync(failingBin, 0o700);
 
-    const echo = new BdTransport({ dir: tmpdir(), actor: "x", bin: garbageBin });
+    const echo = new BdTransport({
+      dir: tmpdir(),
+      actor: "x",
+      bin: garbageBin,
+    });
     const versionError = await rejectionOf(echo.version());
     expect(versionError).toBeInstanceOf(BdCorruptOutputError);
     const createError = await rejectionOf(
@@ -229,7 +239,11 @@ describe("bd transport (real bd)", () => {
     expect(createError).toBeInstanceOf(BdCorruptOutputError);
 
     // A real process that exits nonzero with no output.
-    const fail = new BdTransport({ dir: tmpdir(), actor: "x", bin: failingBin });
+    const fail = new BdTransport({
+      dir: tmpdir(),
+      actor: "x",
+      bin: failingBin,
+    });
     expect(await rejectionOf(fail.version())).toBeInstanceOf(BdTransportError);
 
     // A binary that does not exist at all.
