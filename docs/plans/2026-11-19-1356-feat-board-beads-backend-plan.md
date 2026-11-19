@@ -1,5 +1,4 @@
 ---
-
 title: board-beads — Vercel Board Backend on Beads - Plan
 type: feat
 date: 2026-11-19
@@ -15,7 +14,7 @@ execution: code
 - **Objective:** A developer running Vercel Board can mount `board({ backend: beads({ dir }) })` and run the full Board experience — `vb` CLI, tasks with leases, threads, event fan-out, watchers — with every byte of state living in their beads tracker. A reader who has never seen this repo can check that outcome by running Board's own conformance suite against our backend.
 - **Means:** A TypeScript `Backend` object implementing Board's protocol (65 routes) over a local `bd` CLI subprocess transport, messages mapped one-to-one onto bd issues, shipped as npm package `board-beads` (KTD1–KTD5).
 - **Authority hierarchy:** Board's protocol and conformance suite win on behavior; beads' CLI contract wins on storage mechanics; this plan's KTDs decide everything between.
-- **Execution profile:** One PR ships `v0.1.0`-ready code (units U1–U8). After merge, the project iterates as small patch/minor bumps from trunk; there is **no 1.0** until the surface is proven (KTD8). CI publishes on version tags with npm provenance.
+- **Execution profile:** One PR ships `v0.2.0`-ready code (units U1–U8). After merge, the project iterates as small patch/minor bumps from trunk; there is **no 1.0** until the surface is proven (KTD8). CI publishes on version tags with npm provenance.
 - **Stop conditions:** Stop and report if (a) Board's `Backend`/`Protocol` types change under the pinned `@vercel/board` version, (b) conformance reveals a required check beads cannot answer within the declared 501 set, or (c) the Bun↔`@vercel/board` import assumption fails and the vitest fallback also cannot mount the backend in-process.
 - **Who finishes:** `ce-work` implements U1–U8 and verifies; the operator publishes and announces.
 
@@ -25,7 +24,7 @@ execution: code
 
 ### Summary
 
-`board-beads` is an npm package exporting `beads()` — a Vercel Board `Backend` backed by a beads tracker (`bd` CLI, Dolt storage). Board is the protocol skin; beads is the source of truth. Agents keep their existing `vb` workflows; humans keep their existing tracker. The package targets the empty "Board backends" lane in both ecosystems (Board's backend list, beads' community tools) and ships `0.1.0` during Board's launch window.
+`board-beads` is an npm package exporting `beads()` — a Vercel Board `Backend` backed by a beads tracker (`bd` CLI, Dolt storage). Board is the protocol skin; beads is the source of truth. Agents keep their existing `vb` workflows; humans keep their existing tracker. The package targets the empty "Board backends" lane in both ecosystems (Board's backend list, beads' community tools) and ships `0.2.0` during Board's launch window.
 
 ### Problem Frame
 
@@ -87,7 +86,7 @@ Vercel Board (launched 2026-11-18) coordinates agent fleets through a message-st
 
 - R19. npm package `board-beads`: root export `beads()`, engines `node >=22.18`, ESM, **MPL-2.0 license** (file-level copyleft — anyone may use it anywhere including commercially, but changes to this project's own files must stay open source; amended in-session, user-directed, chosen over MIT for exactly that property).
 - R20. Releases are 0.x versions with small patch/minor bumps; CI publishes on version tags with npm provenance.
-- R21. CI gates every change: Biome format/lint, `tsc --noEmit` strict (+`noUncheckedIndexedAccess`), `bun test` against real bd fixtures (no mocks), and the conformance suite.
+- R21. CI gates every change: Bun formatting and type checking, `bun test` against real bd fixtures (no mocks), and the conformance suite.
 - R22. The README documents quickstart, the bd↔Board mapping table, the single-writer contract, and the bd version policy (`>=1.3.4 <2`, gated at bind; updating bd is sanctioned when capabilities require it), written to be listable both as a Board backend and in beads' community tools. The quickstart covers the cold-start prerequisites before the mount — installing bd (and its Dolt requirement), creating the tracker with `bd init`, and installing Board/`vb` — so adopters arriving from Board's backend list are not bounced at step one.
 - R23. Every implemented route honors the verified caller's access per channel, as Board's Backend contract requires ("every method honors what it may do" — `board()` verifies callers and checks grants but the backend filters): readable-only filtering with not-found answers, author-scoped edit/delete, narrowed-caller refusals on watcher registration/acks and sync records, and actors visibility (R23 implements the caller-honoring side of R1; `board()` supplies the verified caller and its `access`).
 
@@ -95,7 +94,7 @@ Vercel Board (launched 2026-11-18) coordinates agent fleets through a message-st
 
 - S1. A machine-readable conformance receipt (groups, skips, counts) is committed to the repo — pigeon's `evidence/` pattern.
 - S2. A scripted demo shows two `vb` agents claiming and completing tasks through board-beads on one tracker while a third agent's watcher wakes on a reply.
-- S3. `0.1.0` is published on npm with provenance during Board's launch window.
+- S3. `0.2.0` is published on npm with provenance during Board's launch window.
 
 ### Scope Boundaries
 
@@ -105,7 +104,7 @@ Vercel Board (launched 2026-11-18) coordinates agent fleets through a message-st
 
 - **Deferred to follow-up work**
 
-- Writer-mode config axis: `writers: "single"` ships in 0.1.0; `reconciliation` (journal-aware out-of-band drift → synthesized events, covering git-synced setups) planned as a minor; `authority` (proxied-server / `bd serve` mode — pigeon's worker patterns are the starting point) as follow-up. Config keys stay additive; the 0.1.0 options shape reserves the namespace.
+- Writer-mode config axis: `writers: "single"` ships in 0.2.0; `reconciliation` (journal-aware out-of-band drift → synthesized events, covering git-synced setups) planned as a minor; `authority` (proxied-server / `bd serve` mode — pigeon's worker patterns are the starting point) as follow-up. Config keys stay additive; the 0.2.0 options shape reserves the namespace.
 - `updated_at` reconciler for out-of-band writes; schemas store (3 routes, cheap add); search; schedules; grants store.
 
 ### Outstanding Questions
@@ -129,16 +128,16 @@ None blocking. Execution-time unknowns (exact journal payload fields, conformanc
 - KTD2. **Name `board-beads` on npm and GitHub; the API export is `beads()`**, mirroring Board's `local()` idiom. (session-settled: user-directed — chosen over `board-backend-beads`: user weighed Vercel's naming pattern twice and kept "ours" for SEO cleanliness.)
 - KTD3. **v1 storage engine is the local `bd` CLI subprocess** (`ShellTransport` pattern); server-authority over `bd serve` is follow-up work. (session-settled: user-approved — chosen over server-first: the events journal is per-invocation and per-replica, so a local engine is the honest v1; the gh-sync question resolved to layered design.)
 - KTD4. **Messages map one-to-one onto bd issues** (message-as-issue); bd comments stay progress notes. Probe evidence: `bd comments` carry only `{id, issue_id, author, text, created_at}` — no edit verbs, no metadata, no `updated_at`, so comments cannot hold version/revision, reactions, labels, or tombstones. Alternative (message-as-comment) rejected on this evidence. The model matches upstream's own convention: beads' mail documentation stores messages _as issues_ threaded by native `replies-to` graph links (`bd show <id> --thread`), so Board threads read as native beads threads. Thread links use the native `replies-to` dep type where the installed CLI supports it (capability-probed), with `bb.parent` metadata fallback; `bd mail` itself is not used — it delegates to an external provider and adds no persistence Board needs.
-- KTD5. **Single-writer contract, no reconciler in 0.1.0** (KTD5 owns R12) — and it is the *default mode of a config surface*, not a hardcoded identity: `beads()` options reserve an additive `writers` axis ("single" now; a `reconciliation` block for out-of-band drift as a minor; an `authority` block for proxied-server/`bd serve` as follow-up), so deployment shape becomes operator config instead of a rewrite. The cheap same-clone fix ships in docs: operators set `BD_EVENTS_JOURNAL=1` in the environment so coord/beadle/direct-bd writes journal and the feed sees them. Evidence: the journal records only mutations committed through a writer that sets `BD_EVENTS_JOURNAL=1` on the same replica and branch; git-pull'd rows are not journaled.
+- KTD5. **Single-writer contract, no reconciler in 0.2.0** (KTD5 owns R12) — and it is the _default mode of a config surface_, not a hardcoded identity: `beads()` options reserve an additive `writers` axis ("single" now; a `reconciliation` block for out-of-band drift as a minor; an `authority` block for proxied-server/`bd serve` as follow-up), so deployment shape becomes operator config instead of a rewrite. The cheap same-clone fix ships in docs: operators set `BD_EVENTS_JOURNAL=1` in the environment so coord/beadle/direct-bd writes journal and the feed sees them. Evidence: the journal records only mutations committed through a writer that sets `BD_EVENTS_JOURNAL=1` on the same replica and branch; git-pull'd rows are not journaled.
 - KTD6. **Fencing without bd tokens:** `epoch` = per-issue claim counter in backend metadata, `token` = random string; bd's lease TTL is derived empirically at bind (claim a fixture issue, measure `lease_expires_at − heartbeat_at`; measured ≈300s on bd 1.3.4 — lambe's 450s was its own assumption), and the backend heartbeats at TTL/3 of the observed value while a Board lease outruns it; claim races are detected from bd exit codes (13 = guarded loss — the guarded arm of a claim race, consumed by `claimReadyTask` like exit-1 races per R14; 1 + "already claimed by" = plain race). Weakness under out-of-band writers documented, not hidden. Alternatives (no fencing; bd serve for real tokens) rejected — the first breaks conformance's `claim_lost` checks, the second is deferred (KTD3).
-- KTD7. **v0.1.0 implements tasks and 501s exactly: search, schedules, grants, schemas, attachments** (+ `no_wake_by_url`, `no_direct_uploads`). Conformance's OPTIONAL set is `{search, schedules, tasks, grants, schemas, attachments}`; watchers and sync are unskippable and implemented; the schema check has a verified clean skip path, so schemas stay out of 0.1.0 and land as a cheap minor. (session-settled: user-approved — chosen over 501-ing tasks first: conformance-legal but guts the product; walking-skeleton order keeps the speed.)
-- KTD8. **0.x release policy: `0.1.0` first, small bumps after merge, no 1.0.** (session-settled: user-directed — chosen over a 1.0 launch: "do not ship a v1 yet. small minor / patch versions pls.")
+- KTD7. **v0.2.0 implements tasks and 501s exactly: search, schedules, grants, schemas, attachments** (+ `no_wake_by_url`, `no_direct_uploads`). Conformance's OPTIONAL set is `{search, schedules, tasks, grants, schemas, attachments}`; watchers and sync are unskippable and implemented; the schema check has a verified clean skip path, so schemas stay out of 0.2.0 and land as a cheap minor. (session-settled: user-approved — chosen over 501-ing tasks first: conformance-legal but guts the product; walking-skeleton order keeps the speed.)
+- KTD8. **0.x release policy: `0.1.0` is the npm scaffold, `0.2.0` is the first backend release, and subsequent fixes use patch bumps.** (session-settled: user-directed — chosen over a 1.0 launch: "do not ship a v1 yet. small minor / patch versions pls.")
 - KTD9. **Gitmoji commit convention** (`✨ feat:`, `🐛 fix:`, `✅ test:`, `🔧 chore:`, `🔖 chore(release): vX.Y.Z`). (session-settled: user-directed — chosen over plain conventional commits.)
 - KTD10. **Tests run against real bd** — each suite builds a disposable tracker (`bd init` in a temp dir with isolated `HOME`, since `bd init` installs hook files) and exercises real claim/comment/event flows; the conformance suite is a merge gate. No mocks. (session-settled: user-directed — "strong test coverage (no mocks ideally)".)
 - KTD11. **Identity: Board principals map bijectively to `BEADS_ACTOR` slugs**, persisted in backend metadata so fencing (`--if-assignee`) stays stable across restarts. Collisions answer a 4xx at write time, not silently.
 - KTD12. **Units are speed-ordered as a walking skeleton** — transport and model before routes, conformance harness before polish — with the dependency-real parallel shape: U2∥U3 first, then U4∥U5; U6 and U7 additionally gate on U5 (their non-event scaffolding may start early; event-dependent scenarios gate on U5). (session-settled: user-directed — "being first mover is everything… get tons of subagents… go super fast".)
 - KTD13. **Per-issue in-process write gate.** Conformance races concurrent replies, labels, and edits on one message and requires exactly one winner with exact 409 codes; each write is a bd read-modify-write of one metadata JSON field, so the backend serializes an issue's metadata read-modify-write behind an in-process mutex keyed by issue ID — the single-writer process arbitrates caller races — and race losers answer `newer_message` / `label_conflict` / `revision_conflict` per the protocol. Alternative (bd-level compare-and-set) rejected: bd has no metadata CAS; the gate is the smallest mechanism that closes the gap.
-- KTD14. **Heavily config-driven surface.** The project's product philosophy: anything an operator could reasonably want to tune is an option with a sane default; anything internal stays internal. Config keys are additive forever — a knob ships in a minor, never renames, and defaults preserve prior behavior — so consumers can opt in to pieces (writer modes, namespaces, journal behavior) without taking the whole surface. 0.1.0 knobs: `dir`, `bdPath`, `systemActor`, label/metadata namespace override (multi-board-per-tracker), journal handling (warn/auto). Later minors: writer modes, reconciliation, authority. Alternatives (hardcoded conventions; mega-config up front) rejected — the first blocks real deployment shapes, the second builds unproven surface in the launch window.
+- KTD14. **Heavily config-driven surface.** The project's product philosophy: anything an operator could reasonably want to tune is an option with a sane default; anything internal stays internal. Config keys are additive forever — a knob ships in a minor, never renames, and defaults preserve prior behavior — so consumers can opt in to pieces (writer modes, namespaces, journal behavior) without taking the whole surface. 0.2.0 knobs: `dir`, `bdPath`, `systemActor`, label/metadata namespace override (multi-board-per-tracker), journal handling (warn/auto). Later minors: writer modes, reconciliation, authority. Alternatives (hardcoded conventions; mega-config up front) rejected — the first blocks real deployment shapes, the second builds unproven surface in the launch window.
 
 ### Assumptions
 
@@ -201,7 +200,7 @@ sequenceDiagram
 
 ### Alternatives Considered
 
-- **HTTP sidecar now (`bd serve` behind a thin shim)** — rejected for 0.1.0: an extra long-lived process, an experimental version-pinned contract, and no conformance benefit over the subprocess; pigeon's worker work makes it the right follow-up, not the opening move.
+- **HTTP sidecar now (`bd serve` behind a thin shim)** — rejected for 0.2.0: an extra long-lived process, an experimental version-pinned contract, and no conformance benefit over the subprocess; pigeon's worker work makes it the right follow-up, not the opening move.
 - **Messages as bd comments** — rejected on probe evidence (no edit verbs, no metadata, no `updated_at`); would strand revision conflicts, reactions, labels, and tombstones with no home.
 - **Writing Dolt/SQLite directly, bypassing bd** — rejected: abandons bd's write invariants and journal, and makes the single-writer contract a lie.
 - **Multi-package repo (client + backend + examples)** — rejected: one focused package ships faster; examples live in the README until demand.
@@ -212,7 +211,7 @@ sequenceDiagram
 - **Subprocess engine startup per call** ("each call pays engine startup" — lambe): batch writes through `bd batch -f` where the grammar allows (close/update/create/dep only); reads during long-polls are single cheap calls; pooling is follow-up.
 - **Journal retention floors** (7 days / 100k rows default): README recommends raising floors for board deployments; truncation surfaces as `invalid_cursor` with a re-baseline hint, never silent history loss.
 - **Conformance strictness** on core checks (profile headers, tombstones, `after` races): implement against the conformance source, not the docs alone; the harness runs it in CI on every change.
-- **Out-of-band writers** silently break events/fencing (KTD5): the README contract is the mitigation in 0.1.0; the reconciler is the follow-up.
+- **Out-of-band writers** silently break events/fencing (KTD5): the README contract is the mitigation in 0.2.0; the reconciler is the follow-up.
 - **Upstream moves fast** (same-day patches; viral window): speed is the response — community-listing PRs (beads `docs/community-tools.md`, Board backend listings) go out with the release.
 
 ### Output Structure
@@ -242,29 +241,29 @@ board-beads/
 
 ## Implementation Units
 
-### PR1: board-beads 0.1.0 — conformance-green Board backend on beads
+### PR1: board-beads 0.2.0 — conformance-green Board backend on beads
 
 All units ship in this PR: U1–U3 first, U4∥U5 next, U6 and U7 once U5 lands (event-dependent scenarios gate on U5), U8 closes.
 
 ### U1. Bun project scaffold, tooling, CI, npm wiring
 
-- **Goal:** A greenfield repo that already passes `bun run fmt && bun run lint && bun run check && bun test` and can publish.
+- **Goal:** A scaffold that passes formatting, type checking, real-bd tests, and the package build.
 - **Requirements:** R19, R21; KTD1, KTD2, KTD9.
 - **Dependencies:** none.
 - **Files:** `package.json`, `tsconfig.json`, `tsconfig.strict.json`, `biome.json`, `tsdown.config.ts`, `.github/workflows/ci.yml`, `.github/workflows/release.yml`, `LICENSE`, `CONTRIBUTING.md`, `README.md` (skeleton), `test/helpers/bd-fixture.ts`.
 - **Approach:**
-  1. Package `board-beads`, `engines.node >=22.18`, `"type": "module"`, exports `.` (root, `beads()`), MIT.
-  2. Scripts: `fmt`/`lint` (Biome), `check` (`tsc --noEmit -p tsconfig.strict.json`), `test` (`bun test`), `conformance`.
+  1. Package `board-beads`, `engines.node >=22.18`, `"type": "module"`, exports `.` (root, `beads()`), MPL-2.0.
+  2. Scripts: `fmt:check` (`bun fmt --check`), `check` (`bun check`), `test` (`bun test`), `conformance`.
   3. Verify Bun resolves `@vercel/board`'s `node` condition in-process (import `board` + `conformance`, mount a stub backend). If it fails, switch tests to vitest-on-Node and record the switch in the PR body — decision by evidence, same day.
   4. Test fixture helper: temp dir + isolated `HOME` + `bd init` + version assert; used by every later unit.
-  5. CI: check + lint on both Node 22 and Bun; test + conformance run under Bun only (KTD1) — a Node 22 leg adds tests back solely if U1 step 3's vitest fallback triggers; release workflow publishes on `v*` tags with `npm publish --provenance`.
+  5. CI: Bun runs formatting, type checking, real-tracker tests, and conformance. The build runs with Node 22. Release tags require conformance and publish from Node 24 via npm trusted publishing.
 - **Patterns to follow:** pigeon's `package.json`/`biome.json`/`tsconfig.strict.json` trio; tsdown config from `@vercel/board` itself.
 - **Test scenarios:**
   - Fixture helper boots `bd init` in a temp HOME and reports a parsed version ≥1.3.4 <2.
   - `import { board } from "@vercel/board"` + a stub `Backend` answers discovery in-process under Bun.
   - `bun run check` fails on a planted type error and passes clean (gate proven both ways).
   - Test expectation for release workflow: none — exercised at tag time (S3).
-- **Verification:** `bun run check`, `bun run lint`, `bun test` green locally and in CI; `npm pack --dry-run` shows the intended file list.
+- **Verification:** `bun run check`, `bun run fmt:check`, `bun test` green locally and in CI; `npm pack --dry-run` shows the intended file list.
 
 ### U2. bd subprocess transport
 
@@ -278,7 +277,7 @@ All units ship in this PR: U1–U3 first, U4∥U5 next, U6 and U7 once U5 lands 
   3. `bd batch -f <file> --json` writer for close/update/create/dep ops (grammar limits documented in-code); single-op paths for claims/heartbeats/reads.
   4. `bd events tail --since <seq> --json` under `BD_EVENTS_JOURNAL=1` — emits bare journal records (`{seq, ts, op, issue_id, actor, issue}` per record; no envelope); truncation is detected from the gapless-seq contract (first returned seq greater than `since + 1`), and the never-enabled state is a typed result.
   5. Probe `bd update --metadata` merge semantics in the fixture (merge vs whole-blob replace) before any unit leans on it; the transport API exposes whichever semantics bd has (whole-blob replace makes every metadata write a read-modify-write — the surface KTD13's gate covers).
-  5. `bd --version` parse + capability record.
+  6. `bd --version` parse + capability record.
 - **Patterns to follow:** lambe `internal/tracker/shell.go` and `beads.go` exit classification; beadle's dual-shape tolerant parsing.
 - **Test scenarios (real bd):**
   - Create/update/close/claim/comment round-trips against the fixture tracker, envelope unwrapped, actors distinct.
@@ -362,7 +361,7 @@ All units ship in this PR: U1–U3 first, U4∥U5 next, U6 and U7 once U5 lands 
   2. Fencing: epoch = per-issue claim counter (metadata), token = random; renew = heartbeat + until extension with the heartbeat timer at TTL/3 of the bind-probed TTL while a Board lease outruns it; expiry check on read emits `task.expired` and flips claimable.
   3. `claimReadyTask`: candidate scan woken by the U5 journal poller on task-relevant ops (create/update/close/dep_add/dep_remove) with a slow (30s) safety re-poll for out-of-band writes — no fixed 1s `bd list` cadence; assignment priority and label filters per protocol; single-flight claim attempts per candidate; race (exit 13 lost-guard or exit 1 "already claimed by") → next candidate within the wait (F1); `{task: null}` on lapse; `wait` capped at 300s.
   4. Honor the verified caller's access per channel (R23): task reads filter by caller readability; owner-or-`manage` checks for block/unblock/reopen/assign/needs/cancel answer 403 `task_not_owned` to narrowed callers.
-  4. `needs` replacement with cycle walk (≤500), completion readies waiters in the same write and emits their events.
+  5. `needs` replacement with cycle walk (≤500), completion readies waiters in the same write and emits their events.
 - **Patterns to follow:** beadle's claim/unclaim/two-write reopen; lambe's heartbeat cadence; Board's tasks doc for exact 409 codes.
 - **Test scenarios (real bd):**
   - Create with `needs` → waiting; complete the need → waiter flips ready and emits events in the same write (R16).
@@ -399,16 +398,16 @@ All units ship in this PR: U1–U3 first, U4∥U5 next, U6 and U7 once U5 lands 
 - **Goal:** The done-bar executes in CI and the package ships.
 - **Requirements:** R2, R3, R20–R22; KTD7, KTD8, KTD9, KTD10.
 - **Dependencies:** U4–U7.
-- **Files:** `scripts/conformance.ts`, `scripts/demo.ts`, `src/backend.ts` (501 table), `README.md` (full), `docs/mapping.md`, `docs/research/landscape-2026-11-19.md`, `evidence/conformance-0.1.0.json`, `.github/workflows/release.yml` (finalized), `CHANGELOG.md`.
+- **Files:** `scripts/conformance.ts`, `scripts/demo.ts`, `src/backend.ts` (501 table), `README.md` (full), `docs/mapping.md`, `docs/research/landscape-2026-11-19.md`, `evidence/conformance-0.2.0.json`, `.github/workflows/release.yml` (finalized), `CHANGELOG.md`.
 - **Approach:**
   1. `bun run conformance` mounts `conformance(board({ backend: beads({dir: fixture}) }))`, writes the machine receipt (groups/skips/counts) to `evidence/` (pigeon pattern); CI fails on any non-skip failure.
   2. The 501 table (KTD7) lives in one exported record; codes and hint strings match `local()`'s verified bodies.
   3. README: quickstart (`bun i board-beads` → mount → `vb serve`), mapping table, single-writer contract, bd version policy, limitations; open the two community-listing PRs (beads `docs/community-tools.md`, Board backend listing) with the release.
-  4. Tag `v0.1.0` → provenance publish → S3 receipt; CHANGELOG starts the bump cadence (KTD8).
+  4. Tag `v0.2.0` → provenance publish → S3 receipt; CHANGELOG starts the bump cadence (KTD8).
   5. Harness drives the header-gated conformance checks: mount the served board with an `authenticate` verifier and pass `withHeaders`/`withCan` so narrowing, profile-scoped edits, and watcher/inbox refusals are proven, not skipped (R23; the plain in-process run skips them).
   6. `scripts/demo.ts` (S2): two `vb` agents claim and complete tasks while a third agent's watcher wakes on a reply — fixture tracker, README instructions only.
   7. README quickstart covers the cold-start prerequisites (install bd + its Dolt requirement, `bd init`, install Board/`vb`) before the mount; the docs smoke executes them verbatim from an uninitialized temp dir; commit the adapter-landscape search log as `docs/research/landscape-2026-11-19.md` (the Problem Frame's first-mover evidence, made durable); the operator opens the two community-listing PRs (announce duty, Goal Capsule).
-- **Patterns to follow:** pigeon's `evidence/*.json` receipt; gitmoji release tag `🔖 chore(release): v0.1.0`.
+- **Patterns to follow:** pigeon's `evidence/*.json` receipt; gitmoji release tag `🔖 chore(release): v0.2.0`.
 - **Test scenarios:**
   - Harness runs conformance in-process on a fixture tracker and writes a parseable receipt; a planted route failure turns the run red (gate proven).
   - 501 table snapshot test: each declared group answers its exact code/body; `not_supported` for search; `no_wake_by_url` parity with `local()`.
@@ -420,13 +419,13 @@ All units ship in this PR: U1–U3 first, U4∥U5 next, U6 and U7 once U5 lands 
 
 ## Verification Contract
 
-| Gate             | Command                                                              | Applies to                  | Done signal                                                  |
-| ---------------- | -------------------------------------------------------------------- | --------------------------- | ------------------------------------------------------------ |
-| Format/lint      | `bun run fmt && bun run lint` (Biome)                                | every change                | zero findings                                                |
-| Types            | `bun run check` (`tsc --noEmit` strict + `noUncheckedIndexedAccess`) | every change                | zero errors                                                  |
-| Unit/integration | `bun test`                                                           | every change                | green against real bd fixtures; no mocks                     |
-| Conformance      | `bun run conformance`                                                | every change; release block | `ok` on core/paging/tasks/watchers/sync; skips only per KTD7; harness drives the header-gated checks (`withCan`/`withHeaders`, R23) |
-| Release          | tag `vX.Y.Z` → release workflow                                      | release                     | npm publish with provenance; receipt updated                 |
+| Gate             | Command                               | Applies to                  | Done signal                                                                                                                         |
+| ---------------- | ------------------------------------- | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| Format/lint      | `bun run fmt && bun run lint` (Biome) | every change                | zero findings                                                                                                                       |
+| Types            | `bun run check` (`bun check`)         | every change                | zero errors                                                                                                                         |
+| Unit/integration | `bun test`                            | every change                | green against real bd fixtures; no mocks                                                                                            |
+| Conformance      | `bun run conformance`                 | every change; release block | `ok` on core/paging/tasks/watchers/sync; skips only per KTD7; harness drives the header-gated checks (`withCan`/`withHeaders`, R23) |
+| Release          | tag `vX.Y.Z` → release workflow       | release                     | npm publish with provenance; receipt updated                                                                                        |
 
 The bd fixture (U1) is the only sanctioned way tests touch beads; tests never target the operator's real tracker and always isolate `HOME`.
 
@@ -434,9 +433,9 @@ The bd fixture (U1) is the only sanctioned way tests touch beads; tests never ta
 
 ## Definition of Done
 
-- R2 holds: conformance receipt green on the five implemented groups, skips exactly per KTD7, committed as `evidence/conformance-0.1.0.json` (S1).
+- R2 holds: conformance receipt green on the five implemented groups, skips exactly per KTD7, committed as `evidence/conformance-0.2.0.json` (S1).
 - S2's demo script runs clean against a fixture tracker using only README instructions.
-- `0.1.0` published with provenance; CHANGELOG records the release (S3).
+- `0.2.0` published with provenance; CHANGELOG records the release (S3).
 - Every unit's test scenarios exist and pass; no suite uses a mock of `bd`, Board, or the transport.
 - Cleanup: no abandoned experimental code, no commented-out routes, no TODO left in shipped files; the 501 table is the single place unimplemented groups appear.
 - README + `docs/mapping.md` answer: how state maps to bd, what the single-writer contract requires, what happens on journal truncation, and which Board groups are 501 — a cold reader can operate the backend without this session's context.

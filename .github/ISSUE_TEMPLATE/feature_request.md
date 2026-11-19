@@ -3,7 +3,6 @@ name: Feature request
 about: Suggest a capability for board-beads
 title: "feat: "
 labels: enhancement
-
 ---
 
 <!-- Title starts with ✨ (gitmoji convention) — e.g. "✨ feat: expose attachment upload size config" -->
@@ -17,7 +16,7 @@ What are you trying to do, and what blocks you? Describe the workflow, not the s
 If this touches the exported surface (`beads()`, options, behavior), sketch it:
 
 ```ts
-beads({ dir: "...", /* your option here */ });
+beads({ dir: "..." /* your option here */ });
 ```
 
 Behavior-only changes (error codes, event ordering, mapping details) can skip this.

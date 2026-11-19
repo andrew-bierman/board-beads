@@ -42,7 +42,7 @@
     "conformance": "bun run scripts/conformance.ts",
     "verify:platform": "bun run scripts/verify-platform.ts",
     "build": "tsdown",
-    "prepublishOnly": "bun run check && bun test && bun run build",
+    "prepublishOnly": "bun run check && bun test && bun run conformance && bun run build",
     "fmt:check": "bun fmt --check"
   },
   "dependencies": {

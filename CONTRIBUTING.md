@@ -42,3 +42,13 @@ Tests run against real disposable beads trackers — never against the operator'
 - Keep diffs focused; one change per PR.
 - Title starts with a gitmoji.
 - API changes: open an issue first so we can settle the shape before code lands. Pre-1.0, APIs may change freely.
+
+## Releases
+
+Regular PRs merge with the existing package version. To cut a release, commit a
+fresh 0.x version in a release PR and tag the merged commit with the matching
+`vX.Y.Z` tag. Use a patch for compatible fixes and a minor for new functionality
+or pre-1.0 contract changes. The first working adapter is planned for `0.2.0`.
+
+Release tags require the Board conformance suite to pass. Stable versions go to
+npm's `latest` dist-tag and prereleases such as `0.2.0-rc.1` go to `next`.

@@ -3,6 +3,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -14,14 +18,20 @@ jobs:
         with:
           bun-version: 1.4.4
 
-      # bd CLI for the real-tracker test fixtures (plan unit U1).
-      # Note: the module still declares its path as steveyegge/beads even though the
-      # repo lives at gastownhall/beads — install by the declared path.
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-node@v4
         with:
-          go-version: stable
+          node-version: 22
+
       - name: Install bd
-        run: CGO_ENABLED=0 go install -tags gms_pure_go github.com/steveyegge/beads/cmd/bd@v1.3.4
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd "$RUNNER_TEMP"
+          archive=beads_1.3.4_linux_amd64.tar.gz
+          gh release download v1.3.4 --repo gastownhall/beads --pattern "$archive" --pattern checksums.txt
+          grep -F "  $archive" checksums.txt | sha256sum --check --strict
+          tar -xzf "$archive" bd
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -39,7 +49,10 @@ jobs:
       - name: Platform check
         run: bun run verify:platform
 
-      # conformance lands in plan unit U8; keep the step visible but non-blocking until then.
+      - name: Build
+        run: bun run build
+
+      # U8 makes conformance required for main and PRs. Release tags already require it.
       - name: Conformance suite
         run: bun run conformance
-        continue-on-error: true
+        continue-on-error: ${{ github.ref_type != 'tag' }}
