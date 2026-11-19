@@ -397,3 +397,36 @@ describe("bd events journal (real bd)", () => {
     expect(empty).toBeNull();
   });
 });
+
+describe("bd transport tracker isolation (real bd)", () => {
+  let bound: BdFixture | undefined;
+  let ambient: BdFixture | undefined;
+  let savedBeadsDir: string | undefined;
+
+  afterAll(() => {
+    if (savedBeadsDir === undefined) delete process.env.BEADS_DIR;
+    else process.env.BEADS_DIR = savedBeadsDir;
+    bound?.close();
+    ambient?.close();
+  });
+
+  test("an ambient BEADS_DIR cannot redirect a write to another tracker", async () => {
+    bound = await createBdFixture();
+    ambient = await createBdFixture();
+    savedBeadsDir = process.env.BEADS_DIR;
+    process.env.BEADS_DIR = `${ambient.dir}/.beads`;
+
+    const transport = new BdTransport({
+      dir: bound.dir,
+      actor: "isolation",
+    });
+    const created = await transport.create({
+      title: "stays-in-bound-tracker",
+      type: "task",
+      priority: 2,
+    });
+    expect(created.id).not.toBe("");
+    expect(await listTitles(bound)).toContain("stays-in-bound-tracker");
+    expect(await listTitles(ambient)).not.toContain("stays-in-bound-tracker");
+  }, 60_000);
+});
