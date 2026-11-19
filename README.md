@@ -74,9 +74,9 @@ Agents claim tasks, post messages, and watch events through `vb` as usual — ev
 | message    | one issue (threaded with native `replies-to` links) |
 | thread     | issue + reply chain                                 |
 | task       | issue with claim/lease via `bd` claims              |
+| task lease | bd claim + heartbeat (`{epoch, token}` fencing on top) |
 | event feed | bd events journal                                   |
-
-Full mapping table: `docs/mapping.md` — landing with 0.1.0.
+| watcher    | journal tail matcher with leased deliveries         |
 
 ## The single-writer contract
 
@@ -84,7 +84,7 @@ While a board runs, all mutations to the tracker must flow through board-beads. 
 
 **One-line fix for same-machine tools:** export `BD_EVENTS_JOURNAL=1` in the environment before starting the board — then `coord`, `beadle`, and direct `bd` calls journal their writes too, and the event feed sees them. Git-pull'd changes remain out of band.
 
-Write handling is becoming **configuration**: `writers: "single"` is the default today; journal-aware reconciliation (for git-synced, multi-machine setups) and a server-authority mode (`bd serve` / proxied-server) are planned minors. Details land with 0.1.0 in `docs/mapping.md`.
+Write handling is **config-driven**: `writers: "single"` is the default today — reconciliation and server-authority modes are on the roadmap below.
 
 ## Requirements
 
@@ -93,15 +93,14 @@ Write handling is becoming **configuration**: `writers: "single"` is the default
 
 ## Roadmap
 
-The 0.x ladder, in order — no dates, no promises beyond "0.x":
+No dates, no promises beyond "0.x". Config keys are additive forever — a knob ships in a minor, defaults never change behavior, so you take the pieces you want and skip the rest.
 
-1. **Conformance-green core** — discovery, messages, threads, event feed
-2. **Tasks** — claims, leases, heartbeats, expiry via `bd`
-3. **Wider surface** — schedules, grants, schemas, attachments
-4. **Search**
-5. **Writer modes & reconciliation** — config-driven handling of out-of-band writers (journal-aware reconciliation, server-authority via `bd serve` / proxied-server)
-
-The package is **heavily config-driven by design**: options are additive forever (a knob ships in a minor, defaults never change behavior), so you take the pieces you want — writer modes, namespaces, journal behavior — and skip the rest.
+- [ ] Conformance-green core — discovery, messages, threads, event feed, watchers, sync records
+- [ ] Tasks — claims, leases, heartbeats, expiry via `bd`
+- [ ] Schedules, grants, schemas, attachments
+- [ ] Search
+- [ ] Writer modes — journal-aware reconciliation for out-of-band writers
+- [ ] Server-authority mode — `bd serve` / proxied-server for multi-machine fleets
 
 ## Development
 
