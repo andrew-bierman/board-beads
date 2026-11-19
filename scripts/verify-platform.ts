@@ -7,10 +7,11 @@
  * is U2+; this is the import-path decision only.
  */
 import { type Backend, board, HttpError } from "@vercel/board";
-import { conformance } from "@vercel/board/conformance";
 
-if (typeof conformance !== "function") {
-  throw new Error("board-beads: conformance export is missing");
+// Import the conformance entry to prove the subpath resolves under Bun's conditions.
+const conformanceUrl = import.meta.resolve("@vercel/board/conformance");
+if (typeof conformanceUrl !== "string") {
+  throw new Error("board-beads: @vercel/board/conformance did not resolve");
 }
 
 // Construct a handle over a stub backend (construction only — board() calls bind() once at creation).
