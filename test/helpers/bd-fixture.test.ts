@@ -8,11 +8,12 @@ describe("bd-fixture", () => {
 		fixture?.close();
 	});
 
+	// bd init (Dolt-backed) cold start routinely exceeds bun's 5s default timeout.
 	test("boots a real tracker inside the supported bd range", async () => {
 		fixture = await createBdFixture();
 		expect(fixture.version.major).toBe(1);
 		expect(fixture.run).toBeFunction();
-	});
+	}, 120_000);
 
 	test("real create + list round-trip through the bd CLI", async () => {
 		const created = await fixture.run(["create", "fixture smoke", "--json"]);
@@ -21,5 +22,5 @@ describe("bd-fixture", () => {
 		expect(listed.code).toBe(0);
 		const issues = JSON.parse(listed.stdout) as Array<{ title: string }>;
 		expect(issues.some((issue) => issue.title === "fixture smoke")).toBeTrue();
-	});
+	}, 120_000);
 });
