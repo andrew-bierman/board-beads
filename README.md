@@ -80,7 +80,11 @@ Full mapping table: `docs/mapping.md` — landing with 0.1.0.
 
 ## The single-writer contract
 
-While a board runs, all mutations to the tracker must flow through board-beads. Direct `bd` writes, `coord`/`beadle` activity, and git-pull'd changes are **out of band**: invisible to the event feed, and unsupported for fencing — the backend can't detect or arbitrate races it didn't broker. Read-only `bd` use (queries, dashboards) is unaffected. Details land with 0.1.0 in `docs/mapping.md`.
+While a board runs, all mutations to the tracker must flow through board-beads. Direct `bd` writes, `coord`/`beadle` activity, and git-pull'd changes are **out of band**: invisible to the event feed, and unsupported for fencing — the backend can't detect or arbitrate races it didn't broker. Read-only `bd` use (queries, dashboards) is unaffected.
+
+**One-line fix for same-machine tools:** export `BD_EVENTS_JOURNAL=1` in the environment before starting the board — then `coord`, `beadle`, and direct `bd` calls journal their writes too, and the event feed sees them. Git-pull'd changes remain out of band.
+
+Write handling is becoming **configuration**: `writers: "single"` is the default today; journal-aware reconciliation (for git-synced, multi-machine setups) and a server-authority mode (`bd serve` / proxied-server) are planned minors. Details land with 0.1.0 in `docs/mapping.md`.
 
 ## Requirements
 
@@ -95,7 +99,9 @@ The 0.x ladder, in order — no dates, no promises beyond "0.x":
 2. **Tasks** — claims, leases, heartbeats, expiry via `bd`
 3. **Wider surface** — schedules, grants, schemas, attachments
 4. **Search**
-5. **Server-authority mode** via `bd serve` (follow-up)
+5. **Writer modes & reconciliation** — config-driven handling of out-of-band writers (journal-aware reconciliation, server-authority via `bd serve` / proxied-server)
+
+The package is **heavily config-driven by design**: options are additive forever (a knob ships in a minor, defaults never change behavior), so you take the pieces you want — writer modes, namespaces, journal behavior — and skip the rest.
 
 ## Development
 
