@@ -7,6 +7,13 @@ SemVer during early development.
 License: MPL-2.0. Requires Node ≥ 22.18 and `bd` ≥ 1.3.4, < 2 (the `bd` range
 is checked when the backend binds).
 
+## 0.3.0 — 2026-11-20
+
+### Added
+
+- **Schemas**: definition store with immutable versions, built-in name reservations, JSON-schema value validation via board(), narrowed-caller 403s. Un-exempts the conformance schemas group.
+- **Blocks on message views**: fences naming a schema and holding a JSON object now project as `blocks` on message reads.
+
 ## 0.2.0 — 2026-11-20
 
 The first backend release: `beads()` returns a working Board Backend backed by
