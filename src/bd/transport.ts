@@ -408,7 +408,10 @@ function parseJournalRecords(command: string, raw: string): BdJournalRecord[] {
       op,
       issueId,
       actor,
-      issue: typeof row.issue === "string" ? row.issue : null,
+      // The issue snapshot bd attaches, kept as it came (an object today, a
+      // JSON string tolerated): rows carry their own label state, which is
+      // what replayed event walks classify from.
+      issue: row.issue ?? null,
     });
   }
   records.sort((a, b) => a.seq - b.seq);

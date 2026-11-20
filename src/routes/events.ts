@@ -254,6 +254,7 @@ export function createEventRoutes(deps: EventRouteDeps): EventRoutes {
     tail: (cursor) => deps.transport.tailEvents(cursor),
     loadMessage: loader,
     authorFor: deps.authorFor,
+    labels: deps.labels,
     cadenceMs,
     holdMs: deps.holdMs,
   });
@@ -262,6 +263,7 @@ export function createEventRoutes(deps: EventRouteDeps): EventRoutes {
   const translator = createEventTranslator({
     loadMessage: loader,
     authorFor: deps.authorFor,
+    labels: deps.labels,
     holdMs: deps.holdMs,
   });
   const resolveAnchor = createAnchorResolver(deps.transport, loader);

@@ -83,6 +83,12 @@ export interface TranslatorDeps {
   /** The issue as it is now, or null when it is gone or not a message. */
   loadMessage: (issueId: string) => Promise<MessageView | null>;
   authorFor?: AuthorLookup;
+  /**
+   * The label decoder, for reading a row's own snapshot: bd attaches the
+   * labels a write left behind, and replayed walks classify from them
+   * instead of the issue's present. Without it, every row reads as-now.
+   */
+  labels?: LabelsApi;
   /** How long a bare create may wait for its metadata to land (ms). */
   holdMs?: number;
 }
@@ -347,6 +353,27 @@ function reactionDelta(
 }
 
 /**
+ * The labels a row's own issue snapshot carries, as bd label strings, or
+ * null when the row names none — a write that moved no label (a bare
+ * metadata write) attaches no `labels`, which is how the two cases differ.
+ */
+function labelsAtRow(row: BdJournalRecord): string[] | null {
+  const issue: unknown = row.issue;
+  let snapshot: unknown = issue;
+  if (typeof issue === "string" && issue !== "") {
+    try {
+      snapshot = JSON.parse(issue) as unknown;
+    } catch {
+      return null;
+    }
+  }
+  const record = asRecord(snapshot);
+  const labels = record?.labels;
+  if (!Array.isArray(labels)) return null;
+  return labels.filter((entry): entry is string => typeof entry === "string");
+}
+
+/**
  * The row classifier. State lives across rows (per issue: the last
  * classified message state, and a create row's first hold), so one
  * translator instance serves one consumer; the feed and the poller each
@@ -362,7 +389,7 @@ export function createEventTranslator(deps: TranslatorDeps): EventTranslator {
   const holds = new Map<string, number>();
 
   async function translate(row: BdJournalRecord): Promise<RowOutcome> {
-    const prior = seen.get(row.issueId);
+    const prior = seen.get(row.issueId) ?? null;
     const view = await deps.loadMessage(row.issueId);
 
     if (view === null) {
@@ -396,13 +423,26 @@ export function createEventTranslator(deps: TranslatorDeps): EventTranslator {
     }
 
     holds.delete(row.issueId);
-    seen.set(row.issueId, view);
+    // What this row says the labels were: the snapshot's own, decoded, when
+    // it names them; the row before it's, when the write moved no label; the
+    // issue's present, when there is nothing else to go on. A replayed walk
+    // thus reads the transitions a write made, not just where things stand.
+    const atRow = labelsAtRow(row);
+    const labeled: MessageView =
+      atRow === null
+        ? prior === null
+          ? view
+          : { ...view, labels: prior.labels }
+        : deps.labels === undefined
+          ? view
+          : { ...view, labels: deps.labels.fromBdLabels(atRow) };
+    seen.set(row.issueId, labeled);
 
     if (row.op === "create") {
       return { kind: "event", view: postedEvent(row, view, authorFor) };
     }
     if (row.op === "update") {
-      return classifyUpdate(row, prior ?? null, view);
+      return classifyUpdate(row, prior ?? null, labeled);
     }
     if (row.op === "close") {
       return view.deleted

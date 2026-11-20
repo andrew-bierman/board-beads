@@ -1161,8 +1161,11 @@ export function createSyncRoutes(deps: SyncRouteDeps): SyncRoutes {
       const who = routeCallerOf(caller);
       needSyncRecords(who, "ack an inbox event");
       /** The ack's checks and mutation, shared by both write paths. */
-      const ack = (data: Record<string, JsonValue>): Record<string, JsonValue> => {
-        if (data.owner !== who.principalId || data.done === true) throw NO_ITEM();
+      const ack = (
+        data: Record<string, JsonValue>,
+      ): Record<string, JsonValue> => {
+        if (data.owner !== who.principalId || data.done === true)
+          throw NO_ITEM();
         const until = typeof data.until === "number" ? data.until : 0;
         if (data.lease !== input.lease || until <= Date.now()) {
           throw new HttpError(
@@ -1173,7 +1176,8 @@ export function createSyncRoutes(deps: SyncRouteDeps): SyncRoutes {
         }
         if (input.error !== undefined) {
           const attempt = typeof data.attempt === "number" ? data.attempt : 0;
-          if (attempt + 1 >= INBOX_TRIES_MAX) return { ...data, done: true, lease: "" };
+          if (attempt + 1 >= INBOX_TRIES_MAX)
+            return { ...data, done: true, lease: "" };
           return { ...data, lease: "", until: null, attempt: attempt + 1 };
         }
         return { ...data, done: true, lease: "" };
@@ -1187,7 +1191,9 @@ export function createSyncRoutes(deps: SyncRouteDeps): SyncRoutes {
           // same checks replay against the scan, and the record is written
           // whole past the corrupt document.
           const key = `${who.principalId}|${input.id}`;
-          const found = (await state.list("inbox")).find((one) => one.key === key);
+          const found = (await state.list("inbox")).find(
+            (one) => one.key === key,
+          );
           if (found === undefined) throw NO_ITEM();
           await state.put("inbox", key, ack(found.data));
         }

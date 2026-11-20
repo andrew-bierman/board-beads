@@ -12,7 +12,11 @@ import {
 import { createLabels } from "../model/labels.ts";
 import { deriveTitle } from "../model/message.ts";
 import { encodeOlderCursor } from "../model/cursors.ts";
-import { createEventRoutes, type EventsInput, type EventRoutes } from "./events.ts";
+import {
+  createEventRoutes,
+  type EventsInput,
+  type EventRoutes,
+} from "./events.ts";
 import {
   createBdFixture,
   type BdFixture,
@@ -317,7 +321,9 @@ describe("events long-poll", () => {
     const elapsed = Date.now() - started;
 
     expect(elapsed).toBeLessThan(8_000);
-    expect(page.events.some((entry) => entry.message?.id === reply.id)).toBeTrue();
+    expect(
+      page.events.some((entry) => entry.message?.id === reply.id),
+    ).toBeTrue();
   }, 120_000);
 
   test("a bare create holds the feed open until its metadata lands, then answers posted", async () => {
@@ -336,7 +342,13 @@ describe("events long-poll", () => {
     const pending = events(r, { after: "0", wait: 8 });
     await sleep(400);
     const meta = initialMessageMeta({ channel: "held", thread: id });
-    await runOk(r.fixture, ["update", id, "--metadata", encode(meta), "--json"]);
+    await runOk(r.fixture, [
+      "update",
+      id,
+      "--metadata",
+      encode(meta),
+      "--json",
+    ]);
     const page = await pending;
 
     expect(page.events).toHaveLength(1);
@@ -391,8 +403,18 @@ describe("events long-poll", () => {
     ]);
     const pending = events(r, { after: "0", wait: 10 });
     await sleep(500);
-    await runOk(r.fixture, ["config", "set", "events-journal-retain-days", "0"]);
-    await runOk(r.fixture, ["config", "set", "events-journal-retain-rows", "0"]);
+    await runOk(r.fixture, [
+      "config",
+      "set",
+      "events-journal-retain-days",
+      "0",
+    ]);
+    await runOk(r.fixture, [
+      "config",
+      "set",
+      "events-journal-retain-rows",
+      "0",
+    ]);
     await runOk(r.fixture, ["events", "prune", "--before", "2"]);
 
     const started = Date.now();
@@ -408,11 +430,9 @@ describe("events long-poll", () => {
     const r = await rig({ journalWrites: false });
     // Writes land, but this fixture's bd runs without the journal env, so
     // nothing was ever recorded.
-    await runOk(
-      r.fixture,
-      ["create", "--title", "unjournaled", "--json"],
-      { journal: false },
-    );
+    await runOk(r.fixture, ["create", "--title", "unjournaled", "--json"], {
+      journal: false,
+    });
 
     const page = await events(r, { after: "0", wait: 0 });
     expect(page.events).toHaveLength(0);
@@ -437,9 +457,7 @@ describe("events long-poll", () => {
     const r = await rig();
     const message = await post(r, "dev", "original text");
     const first = await events(r, { after: "0" });
-    expect(first.events.map((entry) => entry.type)).toEqual([
-      "message.posted",
-    ]);
+    expect(first.events.map((entry) => entry.type)).toEqual(["message.posted"]);
 
     const edited = await edit(r, message, "the corrected text");
     const afterEdit = await events(r, { after: first.cursor });
@@ -497,9 +515,7 @@ describe("events long-poll", () => {
       reply.id,
     ]);
 
-    const label: NonNullable<EventsInput["label"]> = [
-      ["status", ["open"]],
-    ];
+    const label: NonNullable<EventsInput["label"]> = [["status", ["open"]]];
     const labeled = await events(r, { after: "0", label });
     expect(labeled.events.map((entry) => entry.message?.id)).toEqual([www.id]);
   }, 120_000);
