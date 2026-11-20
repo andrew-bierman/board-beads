@@ -285,6 +285,38 @@ describe("bd transport (real bd)", () => {
     const healthy = await alice.show(created.id);
     expect(healthy.title).toBe("after timeout");
   }, 30_000);
+
+  test("a newline in a batch token refuses up front instead of corrupting the batch", async () => {
+    // bd's batch grammar is line-oriented: a token carrying a newline would
+    // split its line, and bd would answer by rolling the whole transaction
+    // back with an opaque parse error. The renderer refuses before bd runs.
+    const newline = await rejectionOf(
+      alice.batch([
+        { op: "update", id: "x", fields: { title: "line1\nline2" } },
+      ]),
+    );
+    expect(newline).toBeInstanceOf(TypeError);
+    expect((newline as TypeError).message).toContain("line-oriented");
+    const carriage = await rejectionOf(
+      alice.batch([
+        { op: "update", id: "x", fields: { title: "carriage\rreturn" } },
+      ]),
+    );
+    expect(carriage).toBeInstanceOf(TypeError);
+    // bd carries other control characters byte-exact inside quotes (a tab
+    // round-trips, verified against bd 1.3.4), so the renderer must not
+    // refuse those.
+    const seeded = await alice.create({
+      title: "batch token seed",
+      type: "task",
+      priority: 2,
+    });
+    const applied = await alice.batch([
+      { op: "update", id: seeded.id, fields: { title: "has\ttab" } },
+    ]);
+    expect(applied.operations).toBe(1);
+    expect((await alice.show(seeded.id)).title).toBe("has\ttab");
+  }, 60_000);
 });
 
 describe("bd events journal (real bd)", () => {
