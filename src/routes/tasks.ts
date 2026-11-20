@@ -58,6 +58,7 @@ import {
 } from "@vercel/board";
 import { FULL_ACCESS, parseCan } from "@vercel/board/access";
 import type { Access, Permission } from "@vercel/board/access";
+import { deriveActorSlug } from "../model/actors.ts";
 import type { BdResult } from "../bd/transport.ts";
 import { createLabels } from "../model/labels.ts";
 import { deriveTitle } from "../model/message.ts";
@@ -298,7 +299,10 @@ function identityOf(caller: Caller): RouteIdentity {
           ? null
           : principal.expiresAt.toISOString(),
       card: {
-        actor: author.actor,
+        // The bd actor slug the principal maps to (the mapIdentity
+        // derivation), never the raw principal id: authorship reads back
+        // through this card, so `by.actor` stays a valid BEADS_ACTOR shape.
+        actor: deriveActorSlug(author.actor),
         principal: author.principal,
         profile: author.profile,
         kind: actor.kind,
@@ -595,7 +599,8 @@ export function createTaskRoutes(
         // would hold every feed read that walks over them (the journal
         // consumer pins an unclassifiable create), the same contract the
         // store's own probe runner keeps.
-        run: (args) => store.transport.run(args, { omitEnv: ["BD_EVENTS_JOURNAL"] }),
+        run: (args) =>
+          store.transport.run(args, { omitEnv: ["BD_EVENTS_JOURNAL"] }),
       })
         .then((result) => {
           if (result.ok) measuredTtlMs = result.value.ttlMs;

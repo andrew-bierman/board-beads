@@ -20,6 +20,8 @@ import {
   type ProtocolMethods,
 } from "@vercel/board";
 import { createEventRoutes } from "./routes/events.ts";
+import { createSyncRoutes } from "./routes/sync.ts";
+import { createWatcherRoutes } from "./routes/watchers.ts";
 import {
   createBoardStore,
   threadsRoutes,
@@ -35,7 +37,9 @@ export interface BeadsBackendOptions extends BoardStoreOptions {
  * The protocol families this build keeps none of, per the plan's declared
  * 501 set. Route groups leave this table as their units land: `events` is
  * wired (it is a core method, so refusing it fails conformance); watchers
- * and sync land with theirs.
+ * and sync are wired with theirs — conformance counts a 501 there as a
+ * failure, not a skip. Tasks stay refused until their landing is assigned:
+ * the family is declared optional, and the tests are the contract.
  */
 const REFUSED: readonly {
   code: string;
@@ -91,31 +95,6 @@ const REFUSED: readonly {
     message: "this board keeps no files",
     methods: ["upload", "attachment", "uploadStart", "uploadFinish"],
   },
-  {
-    code: "not_supported",
-    message: "this board doesn't keep that here",
-    methods: [
-      // INTEGRATION: watchers and sync land with their units.
-      "watchers",
-      "register",
-      "matches",
-      "ack",
-      "syncImport",
-      "syncReceipt",
-      "syncThread",
-      "syncFind",
-      "syncCopies",
-      "inboxPush",
-      "inboxNext",
-      "inboxAck",
-      "inbox",
-      "typing",
-      "readSource",
-      "joinSource",
-      "synced",
-      "linked",
-    ],
-  },
 ];
 
 /** 501 refusers for every method in the declared families, minus landed ones. */
@@ -150,9 +129,13 @@ export function beads(options: BeadsBackendOptions): Backend {
     labels: store.labels,
     authorFor: (slug) => store.authorForSlug(slug),
   });
+  const watchers = createWatcherRoutes({ store });
+  const sync = createSyncRoutes({ store });
   const routes = {
     ...threadsRoutes(store),
     events: events.events,
+    ...watchers.routes,
+    ...sync.routes,
   };
   const landed = new Set(Object.keys(routes));
   const backend: Backend = {

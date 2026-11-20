@@ -48,7 +48,19 @@ import {
 import { FULL_ACCESS, parseCan } from "@vercel/board/access";
 import type { Access, Permission } from "@vercel/board/access";
 import { BdTransport, type BdResult } from "../bd/transport.ts";
-import { emptyActorAssignments, mapPrincipal } from "../model/actors.ts";
+import { compareBdVersions } from "../bd/version.ts";
+import {
+  BD_MIN_VERSION,
+  BD_RANGE,
+  bdUnavailable,
+  guardBdRoutes,
+  unavailable,
+} from "./unavailable.ts";
+import {
+  emptyActorAssignments,
+  deriveActorSlug,
+  mapPrincipal,
+} from "../model/actors.ts";
 import {
   compareThreadBoundary,
   decodeMessageCursor,
@@ -177,6 +189,11 @@ export interface BoardStoreOptions {
   systemActor?: string;
   /** Label and metadata namespace override (several boards over one tracker). */
   namespace?: string;
+  /**
+   * Per-invocation bd bound, in ms. The sweep suite drives hung-bd
+   * scenarios with a short one; production takes the transport's default.
+   */
+  timeoutMs?: number;
 }
 
 /** The persisted state: the actor map with cards, and the message sequence. */
@@ -396,7 +413,12 @@ function identityOf(caller: Caller): RouteIdentity {
           ? null
           : principal.expiresAt.toISOString(),
       card: {
-        actor: author.actor,
+        // The card's actor is the bd actor slug the principal maps to — the
+        // same derivation mapIdentity persists — never the raw principal id,
+        // which carries separators and whatever unicode its issuer allowed.
+        // Authorship reads back through this card, so `by.actor` stays a
+        // valid BEADS_ACTOR shape whatever a hostile principal looks like.
+        actor: deriveActorSlug(author.actor),
         principal: author.principal,
         profile: author.profile,
         kind: actor.kind,
@@ -481,6 +503,7 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
     bin: options.bdPath,
     actor: systemActor,
     journal: true,
+    timeoutMs: options.timeoutMs,
   });
 
   const state: PersistedState = {
@@ -683,7 +706,19 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
     ensureReady: async (): Promise<void> => {
       if (ready === null) {
         ready = (async () => {
-          await transport.version();
+          const version = await transport.version();
+          // The README's bind gate: `bd >= 1.3.4, < 2`. Older bd predates
+          // the journal and metadata shapes this backend reads; a major
+          // ahead is unexplored churn. Either answers typed, naming the
+          // range — bind never half-serves a tracker it can't decode.
+          if (
+            compareBdVersions(version, BD_MIN_VERSION) < 0 ||
+            version.major >= 2
+          ) {
+            throw unavailable(
+              `bd ${version.major}.${version.minor}.${version.patch} is outside the documented range (${BD_RANGE}): upgrade bd, then rebind`,
+            );
+          }
           state.repliesTo = (await probeRepliesTo(probeRun)).repliesTo;
           await loadState();
         })();
@@ -691,7 +726,14 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
           ready = null;
         });
       }
-      await ready;
+      try {
+        await ready;
+      } catch (error) {
+        // A bd the environment broke (missing, wedged, wrong version,
+        // uninitialized tracker) is the 503 the caller acts on, with the
+        // fix named — never a raw transport error answering 500 internal.
+        throw bdUnavailable(error);
+      }
     },
     run: (args, actor) =>
       actor === undefined
@@ -1070,7 +1112,7 @@ export function threadsRoutes(store: BoardStore): Partial<ProtocolMethods> {
     return entry;
   };
 
-  return {
+  const table: Partial<ProtocolMethods> = {
     /** Where the board is: its URL, and what it syncs (none, until sync lands). */
     async discovery(): Promise<Discovery> {
       await store.ensureReady();
@@ -1884,6 +1926,10 @@ export function threadsRoutes(store: BoardStore): Partial<ProtocolMethods> {
       return { ok: true };
     },
   };
+  // The sweep bar's contract lives here: every route bd failures break out
+  // of answers typed 503 `unavailable` naming the fix, never a raw
+  // transport error the serving layer would report as 500 `internal`.
+  return guardBdRoutes(table);
 }
 
 /** The message a reply answers, held to the caller's readability. */

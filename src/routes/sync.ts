@@ -61,6 +61,7 @@ import {
   initialMessageMeta,
 } from "../model/metadata.ts";
 import type { JsonValue, MessageMeta } from "../model/types.ts";
+import { guardBdRoutes } from "./unavailable.ts";
 
 /** The longest inbox event ID a board takes (the protocol's own bound). */
 export const INBOX_EVENT_ID_MAX: number = 300;
@@ -1363,5 +1364,5 @@ export function createSyncRoutes(deps: SyncRouteDeps): SyncRoutes {
     );
   }
 
-  return { routes };
+  return { routes: guardBdRoutes(routes) };
 }

@@ -24,10 +24,13 @@
  *     signals to subscribers (claim scans wait on `dep_add`; watchers match
  *     translated events).
  *
- * Enrichment reads the issue as it is now (`bd show` + `bd label list`,
- * through the transport's own run) because the journal reader decodes rows
- * without their issue snapshot; the row's own fields (seq, ts, actor) ride
- * the event as its cursor, time, and actor.
+ * Enrichment reads the row's own issue snapshot first — bd attaches the
+ * issue exactly as the write left it, metadata and labels included — so a
+ * row that carries both classifies with no bd spawn at all; only a bare
+ * create (its metadata still in flight) falls back to reading the issue as
+ * it stands now (`bd show` + `bd label list`, through the transport's own
+ * run). The row's own fields (seq, ts, actor) ride the event as its cursor,
+ * time, and actor.
  *
  * A journal that has never recorded is a typed disabled state — not an
  * error — with a warning naming the fix (`BD_EVENTS_JOURNAL=1`), and a
@@ -80,8 +83,15 @@ export type AuthorLookup = (
 ) => MessageAuthorIdentity | null;
 
 export interface TranslatorDeps {
-  /** The issue as it is now, or null when it is gone or not a message. */
-  loadMessage: (issueId: string) => Promise<MessageView | null>;
+  /**
+   * The issue a row names, as the row's own snapshot when it carries one
+   * (the write's exact truth, no spawns), else as it stands now — or null
+   * when it is gone or not a message.
+   */
+  loadMessage: (
+    issueId: string,
+    row?: BdJournalRecord,
+  ) => Promise<MessageView | null>;
   authorFor?: AuthorLookup;
   /**
    * The label decoder, for reading a row's own snapshot: bd attaches the
@@ -150,16 +160,80 @@ function decodeLabelList(data: unknown): string[] {
 }
 
 /**
- * The enrichment read behind classification: the issue as it stands now,
- * with its decoded message view. Anything unreadable — a gone issue, a
- * non-message, a failed read — answers null; none of it throws.
+ * The row's own issue snapshot, as a decodable issue with its at-row labels,
+ * or null when the snapshot is missing either piece (a bare create's is —
+ * its metadata and labels land in the rows after it).
+ */
+function snapshotOf(
+  row: BdJournalRecord,
+): { issue: BdIssue; labels: string[] } | null {
+  let snapshot: unknown = row.issue;
+  if (typeof snapshot === "string" && snapshot !== "") {
+    try {
+      snapshot = JSON.parse(snapshot) as unknown;
+    } catch {
+      return null;
+    }
+  }
+  if (
+    snapshot === null ||
+    typeof snapshot !== "object" ||
+    Array.isArray(snapshot)
+  ) {
+    return null;
+  }
+  const record = snapshot as Record<string, unknown>;
+  if (!Array.isArray(record.labels)) return null;
+  const labels = record.labels.filter(
+    (entry): entry is string => typeof entry === "string",
+  );
+  let metadata: unknown = record.metadata;
+  if (typeof metadata === "string" && metadata !== "") {
+    try {
+      metadata = JSON.parse(metadata) as unknown;
+    } catch {
+      /* bd's own format is an object; leave a string to the decoder */
+    }
+  }
+  const issue = decodeShowRow({ ...record, metadata });
+  if (issue === null) return null;
+  return { issue, labels };
+}
+
+/**
+ * The enrichment read behind classification: a row's own snapshot when it
+ * serves (the write's exact truth, at no spawn cost), else the issue as it
+ * stands now. Anything unreadable — a gone issue, a non-message, a failed
+ * read — answers null; none of it throws.
  */
 export function createMessageLoader(
   deps: EnrichmentDeps,
-): (issueId: string) => Promise<MessageView | null> {
+): (issueId: string, row?: BdJournalRecord) => Promise<MessageView | null> {
   const authorFor =
     deps.authorFor ?? ((): MessageAuthorIdentity | null => null);
-  return async (issueId) => {
+  return async (issueId, row) => {
+    if (row !== undefined) {
+      const snapshot = snapshotOf(row);
+      if (snapshot !== null) {
+        const view = issueToMessage(snapshot.issue, {
+          codec: deps.codec,
+          labels: deps.labels,
+          authorFor,
+          bdLabels: snapshot.labels,
+        });
+        if (view.ok) return view.value;
+        if (
+          snapshot.issue.metadata !== undefined &&
+          snapshot.issue.metadata !== null
+        ) {
+          // The row's own snapshot is whole and says not-a-message: no
+          // as-now read can make this row one.
+          return null;
+        }
+        // A bare create's snapshot: what stands now may already be whole —
+        // read it, and its null takes the hold below.
+      }
+    }
     let shown: BdResult;
     try {
       shown = await deps.transport.run(["show", issueId, "--json"]);
@@ -211,7 +285,8 @@ function writerOf(
   };
 }
 
-function postedEvent(
+/** The `message.posted` event a create row carries once its message reads. */
+export function postedEvent(
   row: BdJournalRecord,
   view: MessageView,
   authorFor: AuthorLookup,
@@ -389,11 +464,22 @@ export function createEventTranslator(deps: TranslatorDeps): EventTranslator {
   const holds = new Map<string, number>();
 
   async function translate(row: BdJournalRecord): Promise<RowOutcome> {
+    // dep_add / dep_remove / comment: no-op rows for the feed (their
+    // board-visible state arrives in the metadata rows of the same write),
+    // and the poller fans their wake signals out before this runs — skip
+    // them without spending enrichment spawns on what they cannot say.
+    if (
+      row.op === "dep_add" ||
+      row.op === "dep_remove" ||
+      row.op === "comment"
+    ) {
+      return { kind: "noop" };
+    }
     const prior = seen.get(row.issueId) ?? null;
-    const view = await deps.loadMessage(row.issueId);
+    const view = await deps.loadMessage(row.issueId, row);
 
     if (view === null) {
-      if (row.op === "delete" && prior !== undefined) {
+      if (row.op === "delete" && prior !== null) {
         // The issue is gone outright; the cache is the only memory it was
         // ever a message, and the tombstone names no message view.
         seen.delete(row.issueId);
@@ -599,8 +685,15 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
   const translator = createEventTranslator(deps);
   let status: PollerStatus = "idle";
   let rawHead = "0";
-  /** The classified checkpoint: rows past a held row are never skipped. */
-  let checkpoint = 0;
+  /**
+   * The classified checkpoint: rows past a held row are never skipped.
+   * Null until the start probe ran: the loop begins at the journal head, not
+   * at zero — every row before this process existed is served by reads that
+   * anchor below the head (a read tails from its caller's own cursor), and
+   * translating all of history here would only spend bd invocations that no
+   * consumer waits on.
+   */
+  let checkpoint: number | null = null;
   let timer: NodeJS.Timeout | undefined;
   let stopped = false;
   /** The tail cycle in flight, if any; set at its start, cleared at its end. */
@@ -642,6 +735,46 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
     if (pending !== null) return pending;
     pending = (async () => {
       try {
+        if (checkpoint === null) {
+          // Start at the head: one probe read places the checkpoint past
+          // everything that happened before this process existed. History
+          // stays servable — a read anchors on its own cursor and tails the
+          // journal directly — so the rows below the head are skipped here
+          // rather than translated one spawn at a time.
+          const probe = await deps.tail("0");
+          if (stopped) return;
+          if (probe.kind === "records") {
+            status = "live";
+            rawHead = probe.cursor;
+            const head = Number(probe.cursor);
+            checkpoint = Number.isSafeInteger(head) && head > 0 ? head : 0;
+            wakeWaiters();
+            return;
+          }
+          if (probe.kind === "truncated") {
+            status = "truncated";
+            rawHead = String(probe.head ?? probe.floor);
+            checkpoint = Math.max(0, probe.floor - 1);
+            for (const fn of truncatedSubs)
+              fn({ floor: probe.floor, head: probe.head });
+            wakeWaiters();
+            return;
+          }
+          // A journal that has never recorded: the disabled warning names
+          // the flag, and later cycles still re-check in case journaling
+          // turns on under this process.
+          status = "disabled";
+          checkpoint = 0;
+          if (!warnings.some((entry) => entry.code === "journal_disabled")) {
+            warnings.push({
+              code: "journal_disabled",
+              message:
+                "the events journal has never recorded on this workspace: writes made without the journal flag (and out-of-band writers) are invisible to the feed",
+              fix: "set BD_EVENTS_JOURNAL=1 on the backend's bd invocations, or enable the workspace with `bd config set events-journal true`",
+            });
+          }
+          return;
+        }
         const page = await deps.tail(String(checkpoint));
         if (stopped) return;
         if (page.kind === "records") {

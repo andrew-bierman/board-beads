@@ -15,6 +15,7 @@ import { beads } from "../backend.ts";
 /** Collect a call's protocol error instead of failing the test on it. */
 async function errorOf(
   promise: Promise<unknown>,
+  what = "the call",
 ): Promise<BoardError | HttpError> {
   try {
     await promise;
@@ -25,7 +26,7 @@ async function errorOf(
     if (error instanceof HttpError) return error;
     throw error;
   }
-  throw new Error("expected the call to fail with a protocol error");
+  throw new Error(`expected ${what} to fail with a protocol error`);
 }
 
 describe("threads and messages routes (real bd, mounted through board())", () => {
@@ -55,7 +56,11 @@ describe("threads and messages routes (real bd, mounted through board())", () =>
     expect((body.url as string).length).toBeGreaterThan(0);
     expect(body.audience).toBe(body.url);
     expect(Array.isArray(body.sync)).toBeTrue();
-  });
+    // Explicit: the unit's convention. The first fetch runs bind (bd
+    // version probe, capability probe, state load), and the full suite runs
+    // fixture sets concurrently — bun's 5s default timeout is a loaded-box
+    // assumption, not a contract.
+  }, 120_000);
 
   test("me answers the handle's own identity and full access", async () => {
     const me = await team.me();
@@ -63,7 +68,7 @@ describe("threads and messages routes (real bd, mounted through board())", () =>
     expect(me.principal).toBe("board:client");
     expect(me.profile).toBeNull();
     expect(Object.keys(me.can)).toContain("*");
-  });
+  }, 120_000);
 
   test("post a root and a reply; threads and thread reads see both", async () => {
     const root = await team.post("dev", "root message text");
@@ -527,10 +532,13 @@ describe("threads and messages routes (real bd, mounted through board())", () =>
     ).toBeTrue();
 
     // A long-poll held past the cursor wakes when a matching post lands.
+    // `wait` bounds the hang, not the semantics: the event-present
+    // assertion below is the wake proof, and under the full suite's load
+    // the delivering bd read can take tens of seconds on its own.
     const pending = team.poll({
       channel: "feed-e2e",
       after: fromMessages.cursor,
-      wait: 20,
+      wait: 60,
     });
     await new Promise((resolve) => setTimeout(resolve, 500));
     const waker = await team.post("feed-e2e", "wake the poll");
@@ -644,7 +652,7 @@ describe("threads and messages routes (real bd, mounted through board())", () =>
       },
     ];
     for (const check of checks) {
-      const error = await errorOf((async () => check.call())());
+      const error = await errorOf((async () => check.call())(), check.code);
       const message = `${check.code}: got ${error.status} ${error.code} (${error.message})`;
       expect(message).toContain(check.code);
       expect(error.status).toBe(check.status);

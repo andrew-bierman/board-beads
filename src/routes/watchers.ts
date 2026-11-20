@@ -50,6 +50,8 @@ import type { BoardStore } from "./threads.ts";
 import {
   createMessageLoader,
   createEventTranslator,
+  postedEvent,
+  type AuthorLookup,
 } from "../events/poller.ts";
 import {
   createPersistedStore,
@@ -58,7 +60,9 @@ import {
   type RouteCaller,
 } from "../state/persisted.ts";
 import type { JsonValue } from "../model/types.ts";
+import type { BdJournalRecord } from "../bd/transport.ts";
 import { createLabels } from "../model/labels.ts";
+import { guardBdRoutes } from "./unavailable.ts";
 
 /** How many watchers one registration may hold (the protocol's own bound). */
 export const REGISTERED_WATCHERS_MAX: number = 32;
@@ -74,7 +78,16 @@ const MATCH_TRIES_MAX = 5;
 /** The journal re-read cadence of the matcher (ms): bd spawns cost engine startup, so this is not a hot loop. */
 const POLL_CADENCE_MS = 1000;
 /** How long a bare create may wait for its metadata in the matcher (ms). */
-const MATCHER_HOLD_MS = 1500;
+const MATCHER_HOLD_MS = 4000;
+/**
+ * How long a bare create may stay pending — unreadable as a message yet —
+ * before the matcher gives up on it (ms), and how many may wait at once.
+ * Outliving the hold many times over keeps a slow write from being
+ * mistaken for a non-message; the caps keep a pathological journal from
+ * growing the probe forever.
+ */
+const PENDING_WINDOW_MS = 60_000;
+const PENDING_MAX = 64;
 
 /** The route table this group answers. */
 export type WatcherRouteTable = Pick<
@@ -289,6 +302,45 @@ function eventThread(event: BoardEventView): string {
   return typeof payload.thread === "string" ? payload.thread : "";
 }
 
+/**
+ * Whether a journal row's own snapshot says it is one of this backend's
+ * persisted-state documents (`src/state/persisted.ts` writes the state
+ * markers atomically with the create), which no hold can ever turn into a
+ * message: holding one would only pin matching behind it.
+ */
+function isStateDocRow(row: BdJournalRecord, namespace: string): boolean {
+  let snapshot: unknown = row.issue;
+  if (typeof snapshot === "string" && snapshot !== "") {
+    try {
+      snapshot = JSON.parse(snapshot) as unknown;
+    } catch {
+      return false;
+    }
+  }
+  if (
+    snapshot === null ||
+    typeof snapshot !== "object" ||
+    Array.isArray(snapshot)
+  )
+    return false;
+  let metadata: unknown = (snapshot as Record<string, unknown>).metadata;
+  if (typeof metadata === "string" && metadata !== "") {
+    try {
+      metadata = JSON.parse(metadata) as unknown;
+    } catch {
+      return false;
+    }
+  }
+  if (
+    metadata === null ||
+    typeof metadata !== "object" ||
+    Array.isArray(metadata)
+  )
+    return false;
+  const blob = metadata as Record<string, unknown>;
+  return blob[`${namespace}.role`] === "state" && `${namespace}.v` in blob;
+}
+
 // ---------------------------------------------------------------------------
 // The route group.
 // ---------------------------------------------------------------------------
@@ -479,14 +531,36 @@ export function createWatcherRoutes(deps: WatcherRouteDeps): WatcherRoutes {
   let pending: Promise<void> | null = null;
   /** Waiters a fresh match releases, for the long-poll. */
   const wakers = new Set<() => void>();
+  /**
+   * Bare creates waiting for their metadata, each with the row that named
+   * it and when the matcher first pended it: a create the translator holds
+   * no longer pins the checkpoint — later rows classify while it settles,
+   * and each cycle gives it one as-now read until it reads as a message.
+   */
+  const pendingCreates = new Map<
+    string,
+    { row: BdJournalRecord; sinceMs: number }
+  >();
+  const authorFor: AuthorLookup = (slug) => store.authorForSlug(slug);
 
   const wake = (): void => {
     for (const fn of [...wakers]) fn();
     wakers.clear();
   };
 
-  /** Head as a cursor string: the newest classified journal seq. */
-  const head = (): string => String(checkpoint ?? 0);
+  /**
+   * The journal's true head, freshly read: the newest seq anything has
+   * written, above whatever this matcher has chewed to. A registration
+   * starts matching from here — "from now on" is the journal's now, not a
+   * backlog this process hasn't caught up with.
+   */
+  const trueHead = async (): Promise<string> => {
+    const page = await store.transport.tailEvents("0");
+    if (page.kind === "records") return page.cursor;
+    if (page.kind === "truncated") return String(Math.max(0, page.floor - 1));
+    return "0"; // a journal that has never recorded
+  };
+
   /** One matcher cycle, serialized: a call while one is in flight rides it. */
   const runCycle = (): Promise<void> => {
     if (pending !== null) return pending;
@@ -500,11 +574,7 @@ export function createWatcherRoutes(deps: WatcherRouteDeps): WatcherRoutes {
     if (checkpoint === null) {
       // Start at the head: one probe read places the checkpoint past
       // everything that happened before this process existed.
-      const page = await store.transport.tailEvents("0");
-      if (page.kind === "records") checkpoint = Number(page.cursor);
-      else if (page.kind === "truncated")
-        checkpoint = Math.max(0, page.floor - 1);
-      else checkpoint = 0; // a journal that has never recorded
+      checkpoint = Number(await trueHead());
       return;
     }
     const page = await store.transport.tailEvents(String(checkpoint));
@@ -515,13 +585,48 @@ export function createWatcherRoutes(deps: WatcherRouteDeps): WatcherRoutes {
     if (page.kind === "disabled") return;
     for (const row of page.events) {
       if (row.seq <= checkpoint) continue;
+      // This backend's own state documents are creates that will never be
+      // messages: skip them on the spot instead of spending the hold — and
+      // the checkpoint — on each one.
+      if (row.op === "create" && isStateDocRow(row, store.codec.namespace)) {
+        checkpoint = row.seq;
+        continue;
+      }
       const outcome = await translator.translate(row);
-      // A held row pins the checkpoint: a bare create may still become a
-      // post, and the matcher must not skip past what it cannot classify.
-      if (outcome.kind === "hold") break;
+      if (outcome.kind === "hold") {
+        // A bare create whose message isn't readable yet: keep it pending
+        // and move the checkpoint past it. Holding the checkpoint here
+        // would stall every match behind this one write; the probe below
+        // settles the create the moment its metadata lands instead.
+        pendingCreates.set(row.issueId, { row, sinceMs: Date.now() });
+        checkpoint = Math.max(checkpoint, row.seq);
+        continue;
+      }
       checkpoint = Math.max(checkpoint, row.seq);
       if (outcome.kind === "event") {
         await matchAll(outcome.view);
+      }
+    }
+    // Settle pending creates, oldest first: one as-now read each, until
+    // the issue reads as a message (its posted event, at its create row's
+    // cursor) or its window runs out. The window outlives the translator's
+    // hold many times over so a slow write is never mistaken for a
+    // non-message, and never grows without bound.
+    if (pendingCreates.size === 0 || stopped) return;
+    const owed = [...pendingCreates.values()].sort(
+      (a, b) => a.row.seq - b.row.seq,
+    );
+    for (const one of owed) {
+      if (stopped) return;
+      const view = await loader(one.row.issueId);
+      if (view !== null) {
+        pendingCreates.delete(one.row.issueId);
+        await matchAll(postedEvent(one.row, view, authorFor));
+      } else if (
+        Date.now() - one.sinceMs > PENDING_WINDOW_MS ||
+        pendingCreates.size > PENDING_MAX
+      ) {
+        pendingCreates.delete(one.row.issueId);
       }
     }
   };
@@ -693,8 +798,11 @@ export function createWatcherRoutes(deps: WatcherRouteDeps): WatcherRoutes {
         }
       }
       // The registration matches events from now on: make sure the matcher
-      // is live and caught up, then take its checkpoint as the start.
+      // is live, then take the journal's true head as the start — not this
+      // process's chewed checkpoint, which may sit behind a backlog and
+      // would otherwise re-match history the registration never asked for.
       await ensureStarted();
+      const since = await trueHead();
       const hash = createHash("sha256")
         .update(JSON.stringify({ watch, sync }))
         .digest("hex")
@@ -705,7 +813,7 @@ export function createWatcherRoutes(deps: WatcherRouteDeps): WatcherRoutes {
         compiled,
         sync,
         hash,
-        since: head(),
+        since,
       };
       await state.put(
         "registration",
@@ -749,8 +857,13 @@ export function createWatcherRoutes(deps: WatcherRouteDeps): WatcherRoutes {
 
       /** The runnable matches: unleased (or lease spent), one per thread, in order. */
       const pull = async (): Promise<MatchView[]> => {
+        // One document read serves the whole pull: the live scan and the
+        // pick walk read the same list.
+        const listed = await state.list("match");
+        const byKey = new Map<string, Record<string, JsonValue>>();
         const live: { key: string; cursor: number }[] = [];
-        for (const record of await state.list("match")) {
+        for (const record of listed) {
+          byKey.set(record.key, record.data);
           const data = record.data;
           if (data.owner !== who.principalId) continue;
           if (data.done === true) continue;
@@ -771,10 +884,6 @@ export function createWatcherRoutes(deps: WatcherRouteDeps): WatcherRoutes {
         // One at a time per thread, oldest first, at most `limit`.
         const picked: string[] = [];
         const threads = new Set<string>();
-        const byKey = new Map<string, Record<string, JsonValue>>();
-        for (const record of await state.list("match")) {
-          byKey.set(record.key, record.data);
-        }
         for (const one of live) {
           if (picked.length >= limit) break;
           const data = byKey.get(one.key);
@@ -800,8 +909,14 @@ export function createWatcherRoutes(deps: WatcherRouteDeps): WatcherRoutes {
           .filter((one): one is MatchView => one !== null);
       };
 
+      let first = true;
       for (;;) {
         if (signal?.aborted) return { matches: [] };
+        // After the first (instant) pull, every empty pull drives one
+        // matcher cycle before it waits: a match lands when its write
+        // lands, not when the cadence next ticks.
+        if (!first) await runCycle().catch(() => undefined);
+        first = false;
         const picked = await pull();
         if (picked.length > 0) return { matches: picked };
         const remaining = deadline - Date.now();
@@ -871,7 +986,7 @@ export function createWatcherRoutes(deps: WatcherRouteDeps): WatcherRoutes {
   void ensureStarted();
 
   return {
-    routes,
+    routes: guardBdRoutes(routes),
     stop: () => {
       stopped = true;
       if (timer !== undefined) {

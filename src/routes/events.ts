@@ -53,6 +53,7 @@ import {
   decodeOlderCursor,
 } from "../model/cursors.ts";
 import type { LabelsApi, MetadataCodec } from "../model/types.ts";
+import { guardBdRoute } from "./unavailable.ts";
 
 /** The protocol's long-poll ceiling, in seconds. */
 const WAIT_CAP_SECONDS = 300;
@@ -276,7 +277,7 @@ export function createEventRoutes(deps: EventRouteDeps): EventRoutes {
     cursor: string,
     input: EventsInput,
   ): Promise<
-    | { kind: "page"; events: BoardEventView[]; cursor: string }
+    | { kind: "page"; events: BoardEventView[]; cursor: string; held: boolean }
     | { kind: "truncated"; floor: number; head: number | null }
     | { kind: "disabled" }
   > {
@@ -289,18 +290,22 @@ export function createEventRoutes(deps: EventRouteDeps): EventRoutes {
     if (page.kind === "disabled") return { kind: "disabled" };
     const matched: BoardEventView[] = [];
     let advanced = base.value;
+    let held = false;
     for (const row of page.events) {
       if (row.seq <= advanced) continue;
       const outcome = await translator.translate(row);
       // A held row pins the cursor: a bare create may still become a post,
       // and the consumer must not skip past what it cannot yet classify.
-      if (outcome.kind === "hold") break;
+      if (outcome.kind === "hold") {
+        held = true;
+        break;
+      }
       advanced = row.seq;
       if (outcome.kind === "event" && matchesFilters(outcome.view, input)) {
         matched.push(outcome.view);
       }
     }
-    return { kind: "page", events: matched, cursor: String(advanced) };
+    return { kind: "page", events: matched, cursor: String(advanced), held };
   }
 
   const events = async (
@@ -368,7 +373,7 @@ export function createEventRoutes(deps: EventRouteDeps): EventRoutes {
         // poller carries the bind warning naming the fix. The read itself
         // behaves like an empty page, so a from-the-start long-poll still
         // waits for the first journaled write instead of answering early.
-        page = { kind: "page", events: [], cursor };
+        page = { kind: "page", events: [], cursor, held: false };
       }
       if (page.events.length > 0) {
         return { events: page.events, cursor: page.cursor };
@@ -379,14 +384,26 @@ export function createEventRoutes(deps: EventRouteDeps): EventRoutes {
       cursor = page.cursor;
       const remaining = deadline - Date.now();
       if (remaining <= 0) return { events: [], cursor };
-      // Early release when the poller sees journal movement; the cadence
-      // sleep is the fallback when it is not running.
-      await Promise.race([
-        poller.waitBeyond(cursor, remaining, signal),
-        sleep(Math.min(cadenceMs, remaining)),
-      ]);
+      // The running poller is the wake source: it tails the journal on its
+      // own cadence and releases this read the moment the head moves past
+      // the cursor, so a waiting read spends no bd reads of its own. The
+      // cadence sleep is only the fallback — a poller that is not running
+      // (or still placing its first checkpoint) — and the re-read a held
+      // row wants stays on the cadence too, bounded by the hold window.
+      const wake = poller.waitBeyond(cursor, remaining, signal);
+      if (page.held || poller.status === "idle") {
+        await Promise.race([wake, sleep(Math.min(cadenceMs, remaining))]);
+      } else {
+        await wake;
+      }
     }
   };
 
-  return { events, poller };
+  return {
+    // A bd failure the route itself declines to classify (journal truncation
+    // is already a typed 400 above) answers typed 503 `unavailable` here,
+    // naming the fix — never a raw transport error after the wait.
+    events: guardBdRoute(events),
+    poller,
+  };
 }
