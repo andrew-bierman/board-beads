@@ -102,10 +102,12 @@ import {
   encodeTaskRecord,
   holdableByEdit,
   movePatch,
+  mvKeyOf,
   newMoveNonce,
   projectTaskView,
   taskRecordOf,
   TASK_LABEL,
+  type TaskMove,
   type TaskMoveEntry,
   type TaskRecord,
 } from "../tasks/record.ts";
@@ -759,17 +761,30 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
     await stampMove(id, move);
   };
 
-  /** The trailing move stamp (the feed's `task.*` events for the flip). */
+  /**
+   * The trailing move stamp (the feed's `task.*` events for the flip). The
+   * stamp pairs the move with the nonce it consumes (`<ns>.mv`) in one
+   * patch — a row serves its move only where the snapshot pairs them (the
+   * feed's pairing guard, see `taskEvents` in src/events/poller.ts), and an
+   * unpaired stamp's nonce never pairs anywhere: the row wears the previous
+   * write's mv, and every later write overwrites the move. The flip's own
+   * state write keeps the task's keys and labels only — its rows wear the
+   * previous move, whose own write already served it.
+   */
   const stampMove = async (
     id: string,
     events: TaskMoveEntry[],
   ): Promise<void> => {
+    const move: TaskMove = { n: newMoveNonce(), events };
     await store.run(
       [
         "update",
         id,
         "--metadata",
-        JSON.stringify(movePatch(codec, { n: newMoveNonce(), events })),
+        JSON.stringify({
+          ...movePatch(codec, move),
+          [mvKeyOf(codec.namespace)]: move.n,
+        }),
         "--json",
       ],
       systemActor,

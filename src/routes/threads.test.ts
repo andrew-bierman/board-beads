@@ -730,6 +730,50 @@ describe("threads and messages routes (real bd, mounted through board())", () =>
     await team.tasks.cancel(made.task.id, "done checking");
   }, 180_000);
 
+  test("the feed carries a task-root flip's own events: the foreign edit's hold and the delete's cancel", async () => {
+    // The flips are threads-surface writes (the shared guard on edit and
+    // delete of a task's root). Their stamps pair the move with the nonce
+    // it consumes, exactly like the tasks routes' stamps — else the feed's
+    // pairing guard filters the event forever.
+    const writer = team.as("writer");
+    const thread = await writer.post(
+      "t-flip",
+      "a profile's thread, made a task by its principal",
+    );
+    const made = await team.tasks.create({ re: thread.id });
+    const anchor = (await team.poll({ channel: "t-flip" })).cursor;
+    const findEvent = async (
+      poll: Parameters<typeof team.poll>[0],
+      type: string,
+    ) => {
+      for (let attempt = 0; attempt < 10; attempt++) {
+        const page = await team.poll(poll);
+        const found = page.events.find(
+          (event) => event.type === type && event.message?.id === made.task.id,
+        );
+        if (found !== undefined) return found;
+        poll = { ...poll, wait: 5 };
+      }
+      return undefined;
+    };
+    // A foreign edit holds the task; the feed must carry the hold.
+    await writer.edit(thread.id, "edited by the profile that wrote it");
+    const blocked = await findEvent(
+      { channel: "t-flip", after: anchor, wait: 5 },
+      "task.blocked",
+    );
+    expect(blocked).toBeTruthy();
+    expect(blocked?.message?.task?.state).toBe("blocked");
+    // Deleting the root cancels the task; the feed must carry the cancel.
+    await writer.delete(thread.id);
+    const canceled = await findEvent(
+      { channel: "t-flip", after: anchor, wait: 5 },
+      "task.canceled",
+    );
+    expect(canceled).toBeTruthy();
+    expect(canceled?.message?.task?.state).toBe("canceled");
+  }, 180_000);
+
   // CI-only red under the official bd binary (issue #11): the task.ready event
   // doesn't reach the feed on the runner's bd build. Un-skip when the bind-time
   // journal-shape probe lands.
