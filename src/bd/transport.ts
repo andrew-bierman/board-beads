@@ -262,17 +262,17 @@ function decodeBatchResult(command: string, result: BdResult): BdBatchResult {
 /**
  * Render one token for the batch grammar, quoting when needed.
  *
- * bd's batch grammar is line-oriented: a token carrying a newline or a
- * carriage return splits the line mid-operation, and bd's parser answers
- * with an opaque parse error that rolls the whole transaction back. Refuse
- * those up front, naming the problem, so the batch never reaches bd. (Other
- * control characters travel byte-exact inside quotes — verified against bd
- * 1.3.4, including a tab — so only the line terminators are refused.)
+ * bd's batch grammar is line-oriented: only a newline splits the line
+ * mid-operation, and bd's parser answers with an opaque parse error that
+ * rolls the whole transaction back. Refuse it up front, naming the problem,
+ * so the batch never reaches bd. Other control characters travel byte-exact
+ * inside quotes — verified against bd 1.3.4, including a carriage return and
+ * a tab — and are deliberately allowed through.
  */
 function renderToken(value: string): string {
-  if (/[\n\r]/.test(value)) {
+  if (/\n/.test(value)) {
     throw new TypeError(
-      "batch tokens cannot carry newline or carriage return characters: bd's batch grammar is line-oriented, and a token with one would split its line and roll back the batch",
+      "batch tokens cannot carry newline characters: bd's batch grammar is line-oriented, and a token with one would split its line and roll back the batch",
     );
   }
   if (/^[A-Za-z0-9@:._/+=<>-]+$/.test(value)) return value;

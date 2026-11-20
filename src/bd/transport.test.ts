@@ -297,15 +297,9 @@ describe("bd transport (real bd)", () => {
     );
     expect(newline).toBeInstanceOf(TypeError);
     expect((newline as TypeError).message).toContain("line-oriented");
-    const carriage = await rejectionOf(
-      alice.batch([
-        { op: "update", id: "x", fields: { title: "carriage\rreturn" } },
-      ]),
-    );
-    expect(carriage).toBeInstanceOf(TypeError);
-    // bd carries other control characters byte-exact inside quotes (a tab
-    // round-trips, verified against bd 1.3.4), so the renderer must not
-    // refuse those.
+    // bd splits on \n only: other control characters travel byte-exact
+    // inside quotes (verified against bd 1.3.4), so a carriage return and a
+    // tab must round-trip through the same batch path rather than be refused.
     const seeded = await alice.create({
       title: "batch token seed",
       type: "task",
@@ -316,6 +310,15 @@ describe("bd transport (real bd)", () => {
     ]);
     expect(applied.operations).toBe(1);
     expect((await alice.show(seeded.id)).title).toBe("has\ttab");
+    const carriage = await alice.batch([
+      {
+        op: "update",
+        id: seeded.id,
+        fields: { title: "carriage\rreturn" },
+      },
+    ]);
+    expect(carriage.operations).toBe(1);
+    expect((await alice.show(seeded.id)).title).toBe("carriage\rreturn");
   }, 60_000);
 });
 
