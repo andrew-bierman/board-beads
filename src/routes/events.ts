@@ -43,7 +43,7 @@ import {
   createEventPoller,
   createEventTranslator,
   createMessageLoader,
-  groupLastRows,
+  createMoveLedger,
   type AuthorLookup,
   type BdReadTransport,
   type EventPoller,
@@ -305,11 +305,17 @@ export function createAnchorResolver(
 export function createEventRoutes(deps: EventRouteDeps): EventRoutes {
   const cadenceMs = deps.cadenceMs ?? DEFAULT_CADENCE_MS;
   const loader = createMessageLoader(deps);
+  // The move ledger: which journal row speaks a stamped move. The poller
+  // feeds it from its own tails (one synchronous tick also places it at
+  // the anchor's service below), and every page this route walks claims
+  // what it reads, so a cold walk's answers are its own first sights.
+  const ledger = createMoveLedger(deps.codec);
   const poller = createEventPoller({
     tail: (cursor) => deps.transport.tailEvents(cursor),
     loadMessage: loader,
     authorFor: deps.authorFor,
     labels: deps.labels,
+    ledger,
     cadenceMs,
     holdMs: deps.holdMs,
   });
@@ -320,6 +326,7 @@ export function createEventRoutes(deps: EventRouteDeps): EventRoutes {
     authorFor: deps.authorFor,
     labels: deps.labels,
     codec: deps.codec,
+    ledger,
     holdMs: deps.holdMs,
   });
   const resolveAnchor = createAnchorResolver(deps.transport, loader);
@@ -348,13 +355,12 @@ export function createEventRoutes(deps: EventRouteDeps): EventRoutes {
       return { kind: "truncated", floor: page.floor, head: page.head };
     }
     if (page.kind === "disabled") return { kind: "disabled" };
-    const groupLast = groupLastRows(page.events);
     const matched: BoardEventView[] = [];
     let advanced = base.value;
     let held = false;
     for (const row of page.events) {
       if (row.seq <= advanced) continue;
-      const outcome = await translator.translate(row, groupLast);
+      const outcome = await translator.translate(row);
       // A held row pins the cursor: a bare create may still become a post,
       // and the consumer must not skip past what it cannot yet classify.
       if (outcome.kind === "hold") {
@@ -423,6 +429,14 @@ export function createEventRoutes(deps: EventRouteDeps): EventRoutes {
             // checkpoint that lags (the loop idles when nobody waits) must
             // not turn that history into the page. One tail places the
             // anchor at the true head; the delivering read tails from it.
+            // The synchronous tick first is what keeps a task's own
+            // creation history: the loop may not have tailed since before
+            // the writes just above this call, and the move ledger the
+            // page walk asks must already know which rows spoke them —
+            // else a later write's label rows (which carry the metadata as
+            // it stood before, previous move included) would read as the
+            // move's first saying, and replay it here.
+            await poller.tick();
             const headPage = await deps.transport.tailEvents(poller.head());
             if (headPage.kind === "records") {
               poller.noteAnswered();

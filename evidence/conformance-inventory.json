@@ -2,8 +2,8 @@
   "backend": "beads",
   "bdVersion": "1.3.4",
   "suite": "@vercel/board/conformance",
-  "startedAt": "2026-11-20T13:12:02.008Z",
-  "finishedAt": "2026-11-20T13:22:02.628Z",
+  "startedAt": "2026-11-20T14:30:11.485Z",
+  "finishedAt": "2026-11-20T14:41:25.850Z",
   "url": "http://in-process.board",
   "ok": false,
   "summary": {
@@ -32,8 +32,8 @@
       "total": 2
     },
     "tasks": {
-      "passed": 19,
-      "failed": 1,
+      "passed": 20,
+      "failed": 0,
       "skipped": 4,
       "total": 24
     },
@@ -307,8 +307,7 @@
     {
       "group": "tasks",
       "name": "changes what a task needs: it waits for the new ones, is ready once they have completed, and at once with none",
-      "status": "failed",
-      "detail": "the changes of a task whose needs changed, with its state after each: expected [[\"task.needs_changed\",\"waiting\"],[\"task.needs_changed\",\"waiting\"],[\"task.ready\",\"ready\"],[\"task.needs_changed\",\"waiting\"],[\"task.needs_changed\",\"ready\"],[\"task.blocked\",\"blocked\"],[\"task.needs_changed\",\"blocked\"],[\"task.unblocked\",\"waiting\"],[\"task.ready\",\"ready\"]], got [[\"task.created\",\"ready\"],[\"task.needs_changed\",\"waiting\"],[\"task.needs_changed\",\"waiting\"],[\"task.ready\",\"ready\"],[\"task.needs_changed\",\"waiting\"],[\"task.needs_changed\",\"ready\"],[\"task.blocked\",\"blocked\"],[\"task.needs_changed\",\"blocked\"],[\"task.unblocked\",\"waiting\"],[\"task.ready\",\"ready\"]]"
+      "status": "passed"
     },
     {
       "group": "tasks",

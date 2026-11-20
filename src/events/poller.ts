@@ -28,6 +28,11 @@
  *     message as the event leaves it and the labels before it for the
  *     feed's filter. The move rides beside the message event; the
  *     watchers' own translator, which carries no codec, hears none of it.
+ *     Which row speaks a move is the move ledger's word (see
+ *     `createMoveLedger`): the row that introduced the nonce — the write's
+ *     own stamp row — speaks it; the rows after it that wear the same move
+ *     (a later write's label rows carry the metadata as it stood before,
+ *     previous move included) say nothing.
  *
  * Enrichment reads the row's own issue snapshot first — bd attaches the
  * issue exactly as the write left it, metadata and labels included — so a
@@ -141,18 +146,23 @@ export interface TranslatorDeps {
    * events.
    */
   codec?: MetadataCodec;
+  /**
+   * The move ledger (see `createMoveLedger`): what decides which row of the
+   * journal speaks a stamped move. Without it, every nonce-paired row
+   * speaks — the cold walk's own first sights decide.
+   */
+  ledger?: MoveLedger;
   /** How long a bare create may wait for its metadata to land (ms). */
   holdMs?: number;
 }
 export interface EventTranslator {
   /**
-   * `groupLast` carries the seqs that end their own (issue, write-second)
-   * group in the page being walked — the only rows whose snapshot metadata
-   * is a write's final state. A task move served from any other row of the
-   * group would be a stale copy of an earlier move, so when the set is
-   * given, rows outside it carry no task events.
+   * Classifies one journal row at the reader's cursor. Rows are handed in
+   * in journal order per read; a row's answer is its own word, with no
+   * page-relative state — which row speaks a stamped move is the ledger's
+   * journal-absolute fact, not this page's.
    */
-  translate(row: BdJournalRecord, groupLast?: Set<number>): Promise<RowOutcome>;
+  translate(row: BdJournalRecord): Promise<RowOutcome>;
 }
 /** The transport surface enrichment reads through: the bd module's own. */
 export interface BdReadTransport {
@@ -577,32 +587,102 @@ function movePayload(
   }
 }
 /**
+ * The move ledger: where each stamped move's nonce was first seen, per
+ * issue, so the journal's own rows decide who speaks a move — not the page
+ * a reader happens to walk.
+ *
+ * bd journals one multi-part write as a record per changed field, and the
+ * rows of a write carry the metadata AS IT STOOD when that field changed:
+ * the label rows of write N wear write N-1's whole state — its stamped
+ * move included, nonce-paired and all. The move a reader must hear is the
+ * write's OWN word, stamped in its trailing write (see `stampMove` in
+ * src/routes/tasks.ts): the first journal row that carries the nonce. That
+ * row speaks the move; every later row wearing it — however nonce-paired —
+ * repeats what the journal already said, and says it to readers whose
+ * cursor sits past the first saying.
+ *
+ * Two failure modes this replaces, both of the page-relative rule that
+ * judged a row by its (issue, write-second) group within the page at hand:
+ *   - bd stamps row `ts` at second precision, so one write's rows can
+ *     straddle a second boundary — its label row becomes its group's last
+ *     in the page and re-serves the PREVIOUS move to a reader anchored
+ *     above it (a task's own `task.created` replayed into its changes);
+ *   - two writes to one task within one second merge into one group, and
+ *     only the last row speaks — the earlier write's move is never served.
+ *
+ * The ledger is fed from both places rows arrive: the poller tails the
+ * journal on its own cadence (so a move is known before any page asks
+ * about it), and each page's walk claims what it reads. Claims are
+ * idempotent and seq-equality answers, so a poller cycle and a page walk
+ * seeing the same row agree, and a reader walking history from a cold
+ * cursor gets the exact sequence — each move once, from its own row.
+ */
+export interface MoveLedger {
+  /**
+   * Record `seq` as where `nonce` was first seen on `issueId`, and answer
+   * whether this seq IS that first sighting: true for the row that
+   * introduced the move, false for any later row wearing it. Concurrent
+   * readers of one row both get true.
+   */
+  claim(issueId: string, nonce: string, seq: number): boolean;
+  /** Record every stamped move a journal row's snapshot carries. */
+  observe(row: BdJournalRecord): void;
+}
+export function createMoveLedger(codec: MetadataCodec): MoveLedger {
+  /** issueId → nonce → the seq of the first row seen carrying it. */
+  const firsts = new Map<string, Map<string, number>>();
+  function claim(issueId: string, nonce: string, seq: number): boolean {
+    let own = firsts.get(issueId);
+    if (own === undefined) {
+      own = new Map<string, number>();
+      firsts.set(issueId, own);
+    }
+    const seen = own.get(nonce);
+    if (seen === undefined) {
+      own.set(nonce, seq);
+      return true;
+    }
+    return seen === seq;
+  }
+  return {
+    claim,
+    observe(row: BdJournalRecord): void {
+      const move = readMove(codec, metadataAtRow(row));
+      if (move !== null) claim(row.issueId, move.n, row.seq);
+    },
+  };
+}
+/**
  * The task events one row carries, from the write's own stamped move: each
  * event with the message as that event leaves it, and the labels before it
  * carrying the state the task wrote from — so a `board.task=ready` feed
  * shows a claim whose message left `ready`, however late this reader
- * arrived. A move the consumer has already served says nothing again.
+ * arrived. The ledger decides whether this row is the move's own: only the
+ * row that introduced the nonce speaks; the rows after it that wear the
+ * same move (a later write's label rows) say nothing again.
  */
 function taskEvents(
   codec: MetadataCodec,
   row: BdJournalRecord,
   view: MessageView,
   authorFor: AuthorLookup,
-  served: Map<string, string>,
+  ledger: MoveLedger | undefined,
   prior: MessageView | null,
-  groupLast?: Set<number>,
 ): TranslatedEvent[] {
   const metadata = metadataAtRow(row);
   const move = readMove(codec, metadata);
   if (move === null) return [];
-  // A row that is not the last of its write group carries the metadata as
-  // it stood BEFORE the write — its move is the previous one, whose own
-  // write already served it. The write's final row wears the new move and
-  // the new nonce together (mv), and only that pairing speaks.
-  if (groupLast !== undefined && !groupLast.has(row.seq)) return [];
+  // The row must pair the move with the nonce its record consumed: the
+  // partial snapshots bd journals around a multi-part write — the metadata
+  // row carrying the fresh nonce, the stamp not yet landed — wear a move
+  // their write didn't make.
   if (readMv(codec, metadata) !== move.n) return [];
-  if (served.get(row.issueId) === move.n) return [];
-  served.set(row.issueId, move.n);
+  // The move's own row speaks it; the rows after it that wear the same
+  // move say nothing. Without a ledger, a cold walk's own first sights
+  // decide (each nonce speaks from the first row this reader sees it on).
+  if (ledger !== undefined && !ledger.claim(row.issueId, move.n, row.seq)) {
+    return [];
+  }
   const { actor } = writerOf(row, authorFor);
   const by = authorFor(row.actor)?.by ?? {
     actor: row.actor,
@@ -651,22 +731,6 @@ function bareCreateRow(row: BdJournalRecord): boolean {
   );
 }
 
-/**
- * The seqs that end their own (issue, write-second) group in a page of
- * journal rows: bd journals one multi-part write as a record per changed
- * field, every snapshot but the group's last carrying the metadata as it
- * stood before the write got to it. A task move may be served from the
- * group's last row alone — its snapshots pair the write's own move nonce
- * with the nonce its record consumed; every other row of the group would
- * re-serve the previous move.
- */
-export function groupLastRows(rows: readonly BdJournalRecord[]): Set<number> {
-  const last = new Map<string, number>();
-  for (const row of rows) {
-    last.set(`${row.issueId}\n${row.ts}`, row.seq);
-  }
-  return new Set(last.values());
-}
 export function createEventTranslator(deps: TranslatorDeps): EventTranslator {
   // The hold has to outlast the metadata write's bd latency on a loaded
   // box: a row whose hold expired before its metadata lands is skipped for
@@ -680,12 +744,8 @@ export function createEventTranslator(deps: TranslatorDeps): EventTranslator {
   const seen = new Map<string, MessageView>();
   /** issueId → epoch ms of the first unclassifiable read of a bare create. */
   const holds = new Map<string, number>();
-  /** issueId → the nonce of the last task move this consumer served. */
-  const served = new Map<string, string>();
-  async function translate(
-    row: BdJournalRecord,
-    groupLast?: Set<number>,
-  ): Promise<RowOutcome> {
+  const ledger = deps.ledger;
+  async function translate(row: BdJournalRecord): Promise<RowOutcome> {
     // dep_add / dep_remove / comment: no-op rows for the feed (their
     // board-visible state arrives in the metadata rows of the same write),
     // and the poller fans their wake signals out before this runs — skip
@@ -771,9 +831,8 @@ export function createEventTranslator(deps: TranslatorDeps): EventTranslator {
               row,
               view,
               authorFor,
-              served,
+              ledger,
               prior ?? null,
-              groupLast,
             );
       if (base.kind === "event") {
         return {
@@ -894,6 +953,12 @@ export interface EventPollerDeps extends TranslatorDeps {
   tail: (cursor: string) => Promise<BdEventsPage>;
   /** How often a running poller re-tails (ms). */
   cadenceMs?: number;
+  /**
+   * The move ledger, fed every row this loop tails — so a stamped move is
+   * known to the journal's readers before any page of theirs asks after
+   * it, whatever cursor they read from.
+   */
+  ledger?: MoveLedger;
 }
 export interface EventPoller {
   readonly status: PollerStatus;
@@ -1050,6 +1115,11 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
             // answered the tail, it just has no rows yet. Only a tail that
             // names itself disabled may.
             journalEnabledSeen = true;
+            // The probe read the journal whole: everything it saw is the
+            // ledger's to know, whatever cursors readers bring later.
+            if (deps.ledger !== undefined) {
+              for (const row of probe.events) deps.ledger.observe(row);
+            }
             rawHead = probe.cursor;
             const head = Number(probe.cursor);
             checkpoint = Number.isSafeInteger(head) && head > 0 ? head : 0;
@@ -1097,13 +1167,22 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
           journalEnabledSeen = true;
           rawHead = page.cursor;
           moved = page.events.length > 0;
+          // Every row feeds the move ledger first, whatever anyone listens
+          // for: a stamped move must be known before a page of a reader
+          // whose cursor sits above it asks whether that row spoke it. The
+          // ledger read is metadata alone — no bd spawns — and the hold
+          // below must not pin it: a held bare create waits on its
+          // classification, not on the journal's word about the rows after
+          // it.
+          if (deps.ledger !== undefined) {
+            for (const row of page.events) deps.ledger.observe(row);
+          }
           // Row classification serves this poller's own subscribers; the
           // feed's readers and the claim scans consume only the raw head.
           // With nobody listening, translating rows — and the enrichment
           // spawns a held bare create drags per cycle — is work nobody
           // asked for, so the loop just advances its checkpoint.
           const classify = eventSubs.size > 0;
-          const groupLast = groupLastRows(page.events);
           for (const row of page.events) {
             for (const fn of recordSubs) {
               fn({
@@ -1117,7 +1196,7 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
               checkpoint = Math.max(checkpoint, row.seq);
               continue;
             }
-            const outcome = await translator.translate(row, groupLast);
+            const outcome = await translator.translate(row);
             // A held row pins the checkpoint: its classification (a post, or
             // a plain issue) is decided on a later cycle, never skipped.
             if (outcome.kind === "hold") break;
