@@ -4,6 +4,8 @@ import {
   rmSync,
   writeFileSync,
   chmodSync,
+  readFileSync,
+  existsSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,6 +19,7 @@ import {
 import { type BdFixture, createBdFixture } from "./helpers/bd-fixture.ts";
 import { createEventRoutes } from "../src/routes/events.ts";
 import { createBoardStore, threadsRoutes } from "../src/routes/threads.ts";
+import { createTaskRoutes } from "../src/routes/tasks.ts";
 import { createWatcherRoutes } from "../src/routes/watchers.ts";
 import { createSyncRoutes } from "../src/routes/sync.ts";
 import { createLabels } from "../src/model/labels.ts";
@@ -99,6 +102,7 @@ function mountBackend(
   events.poller.start();
   const watchers = createWatcherRoutes({ store, cadenceMs: 250 });
   const sync = createSyncRoutes({ store });
+  const tasks = createTaskRoutes({ store, poller: events.poller });
   const backend = {
     keeps: true,
     routes: [],
@@ -106,6 +110,7 @@ function mountBackend(
     events: events.events,
     ...watchers.routes,
     ...sync.routes,
+    ...tasks,
     trust: {
       grants: async () => [
         {
@@ -1606,5 +1611,217 @@ describe("the sweep bar: every implemented route answers typed under hostile inp
     });
     expectTyped(inboxAck, "ack of unknown inbox event");
     expect([404, 409]).toContain(inboxAck.status);
+  }, 120_000);
+});
+
+// ---------------------------------------------------------------------------
+// The move stamp's delivery: a trailing write whose loss the feed would
+// never surface (the stamp's absence reads as "nothing happened", not as
+// an error). These tests inject stamp-write failures through a stateful
+// fake bd — the suite's documented failure-injection pattern — and hold
+// the route to its bar: retry the stamp, verify it landed, and answer
+// typed when it genuinely cannot, never silently.
+// ---------------------------------------------------------------------------
+
+/** Write a stateful fake `bd` that can fail or unpair move stamps. */
+function fakeStampingBd(
+  scratch: string,
+  options: { failStamps?: number; unpairFirstStamp?: boolean } = {},
+): string {
+  const stateDir = join(scratch, "state");
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(
+    join(stateDir, "config.json"),
+    `${JSON.stringify({ failStamps: options.failStamps ?? 0, unpairFirstStamp: options.unpairFirstStamp === true, stamps: 0, ids: 0 })}\n`,
+  );
+  const path = join(scratch, "bd");
+  writeFileSync(
+    path,
+    `#!/usr/bin/env bun
+const { readFileSync, writeFileSync, existsSync, mkdirSync } = require("node:fs");
+const { join } = require("node:path");
+const state = ${JSON.stringify(stateDir)};
+const issues = join(state, "issues");
+const cfg = () => JSON.parse(readFileSync(join(state, "config.json"), "utf8"));
+const saveCfg = (c) => writeFileSync(join(state, "config.json"), JSON.stringify(c) + "\\n");
+const args = process.argv.slice(2);
+const say = (value) => { process.stdout.write(typeof value === "string" ? value : JSON.stringify(value)); };
+const issueOf = (id) => {
+  const path = join(issues, id + ".json");
+  return existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : null;
+};
+const saveIssue = (issue) => {
+  mkdirSync(issues, { recursive: true });
+  writeFileSync(join(issues, issue.id + ".json"), JSON.stringify(issue));
+};
+if (args[0] === "--version") { say("bd version 1.3.4 (fake)\\n"); process.exit(0); }
+if (args[0] === "config") { say("false\\n"); process.exit(0); }
+if (args[0] === "events") { process.exit(0); }
+if (args[0] === "list") {
+  let rows = [];
+  try { rows = require("node:fs").readdirSync(issues).filter((f) => f.endsWith(".json")).map((f) => JSON.parse(readFileSync(join(issues, f), "utf8"))); } catch {}
+  say({ data: rows }); process.exit(0);
+}
+if (args[0] === "show") {
+  const found = issueOf(args[1]);
+  say({ data: found === null ? [] : [found] }); process.exit(0);
+}
+if (args[0] === "create") {
+  const c = cfg();
+  c.ids += 1;
+  saveCfg(c);
+  const id = "t-" + String(c.ids).padStart(3, "0");
+  const seeded = {};
+  const metaArg = args.find((a) => a.startsWith("--metadata="));
+  if (metaArg !== undefined) {
+    try { Object.assign(seeded, JSON.parse(metaArg.slice("--metadata=".length))); } catch {}
+  }
+  saveIssue({ id, title: "(fake)", status: "open", created_at: new Date().toISOString(), updated_at: new Date().toISOString(), metadata: seeded, labels: [] });
+  say({ data: [{ id }] }); process.exit(0);
+}
+if (args[0] === "update") {
+  const id = args[1];
+  const found = issueOf(id);
+  if (found === null) { process.stderr.write("no such issue\\n"); process.exit(1); }
+  const at = args.indexOf("--metadata");
+  if (at >= 0) {
+    let patch;
+    try { patch = JSON.parse(args[at + 1]); } catch { process.stderr.write("bad metadata\\n"); process.exit(1); }
+    const isStamp = Object.keys(patch).some((k) => k.endsWith(".move"));
+    if (isStamp) {
+      const c = cfg();
+      c.stamps += 1;
+      const unpair = c.unpairFirstStamp && c.stamps === 1;
+      if (c.failStamps > 0) {
+        c.failStamps -= 1;
+        saveCfg(c);
+        process.stderr.write("stamp injected failure\\n");
+        process.exit(1);
+      }
+      saveCfg(c);
+      if (unpair) {
+        // Another writer consumed a nonce, and this stamp's own pairing key
+        // is dropped: the answer's snapshot pairs the move with nothing.
+        for (const k of Object.keys(patch)) if (k.endsWith(".mv")) delete patch[k];
+        patch["bb.mv"] = "zz-consumed-by-another";
+      }
+    }
+    found.metadata = { ...found.metadata, ...patch };
+  }
+  const add = args.indexOf("--add-label");
+  if (add >= 0 && !found.labels.includes(args[add + 1])) found.labels.push(args[add + 1]);
+  const remove = args.indexOf("--remove-label");
+  if (remove >= 0) found.labels = found.labels.filter((l) => l !== args[remove + 1]);
+  found.updated_at = new Date().toISOString();
+  saveIssue(found);
+  say({ data: [found] }); process.exit(0);
+}
+if (args[0] === "label") { process.exit(0); }
+if (args[0] === "dep") { process.exit(0); }
+if (args[0] === "heartbeat" || args[0] === "unclaim") { process.exit(0); }
+if (args[0] === "board-beads-probe" || args[0] === "probe") { say('{"id":"probe"}'); process.exit(0); }
+say([]);
+process.exit(0);
+`,
+    { mode: 0o755 },
+  );
+  chmodSync(path, 0o755);
+  return path;
+}
+
+/** The fake's issue state for one id, with its merged metadata. */
+function fakeIssue(
+  scratch: string,
+  id: string,
+): { metadata: Record<string, unknown>; labels: string[] } | null {
+  const path = join(scratch, "state", "issues", `${id}.json`);
+  if (!existsSync(path)) return null;
+  return JSON.parse(readFileSync(path, "utf8") as string) as {
+    metadata: Record<string, unknown>;
+    labels: string[];
+  };
+}
+
+describe("failure modes: a move stamp that cannot land answers typed, never silent", () => {
+  let fixture: BdFixture;
+  const scratch = mkdtempSync(join(tmpdir(), "bb-stamp-"));
+
+  beforeAll(async () => {
+    fixture = await createBdFixture();
+  }, 60_000);
+
+  afterAll(() => {
+    fixture?.close();
+    rmSync(scratch, { recursive: true, force: true });
+  });
+
+  test("a stamp that fails twice lands on the retry, and the write answers whole", async () => {
+    const bin = fakeStampingBd(join(scratch, "retry"), { failStamps: 2 });
+    mkdirSync(join(scratch, "retry", "tracker"), { recursive: true });
+    const app = mount(join(scratch, "retry", "tracker"), { bdPath: bin });
+    try {
+      const made = await call(app.app, "POST", "/tasks", {
+        body: { channel: "dev", text: "stamp retried" },
+      });
+      expectTyped(made, "task create through two failed stamps");
+      expect(made.status).toBe(201);
+      const view = (
+        made.body as { task?: { id?: string; task?: { state?: string } } }
+      ).task;
+      expect(view?.task?.state).toBe("ready");
+      // The stamp landed whole: the move and the nonce it consumes ride the
+      // same merged blob, so the row the feed reads pairs them.
+      const issue = fakeIssue(join(scratch, "retry"), view?.id ?? "");
+      expect(issue).not.toBeNull();
+      const move = issue?.metadata["bb.move"] as { n?: string } | undefined;
+      expect(typeof move?.n).toBe("string");
+      expect(issue?.metadata["bb.mv"]).toBe(move?.n);
+    } finally {
+      app.close();
+    }
+  }, 120_000);
+
+  test("a stamp whose row can never pair retries under a fresh nonce and lands", async () => {
+    const bin = fakeStampingBd(join(scratch, "unpair"), {
+      unpairFirstStamp: true,
+    });
+    mkdirSync(join(scratch, "unpair", "tracker"), { recursive: true });
+    const app = mount(join(scratch, "unpair", "tracker"), { bdPath: bin });
+    try {
+      const made = await call(app.app, "POST", "/tasks", {
+        body: { channel: "dev", text: "stamp unpaired once" },
+      });
+      expectTyped(made, "task create through an unpaired stamp");
+      expect(made.status).toBe(201);
+      const view = (made.body as { task?: { id?: string } }).task;
+      const issue = fakeIssue(join(scratch, "unpair"), view?.id ?? "");
+      const move = issue?.metadata["bb.move"] as { n?: string } | undefined;
+      // The landed move is the fresh nonce's own, paired with the nonce it
+      // consumes — not the unpaired first stamp's, which no row could speak.
+      expect(typeof move?.n).toBe("string");
+      expect(issue?.metadata["bb.mv"]).toBe(move?.n);
+      expect(issue?.metadata["bb.mv"]).not.toBe("zz-consumed-by-another");
+    } finally {
+      app.close();
+    }
+  }, 120_000);
+
+  test("a stamp that cannot land at all answers 503 move_not_stamped, and names the loss", async () => {
+    const bin = fakeStampingBd(join(scratch, "lost"), { failStamps: 99 });
+    mkdirSync(join(scratch, "lost", "tracker"), { recursive: true });
+    const app = mount(join(scratch, "lost", "tracker"), { bdPath: bin });
+    try {
+      const made = await call(app.app, "POST", "/tasks", {
+        body: { channel: "dev", text: "stamp never lands" },
+      });
+      // The write itself landed; what answers is the typed loss of its
+      // event — 503, the route's own code, never a silent 201 and never a
+      // raw 500.
+      expect(made.status).toBe(503);
+      expect(made.code).toBe("move_not_stamped");
+      expect(made.message).toMatch(/feed will not carry it/i);
+    } finally {
+      app.close();
+    }
   }, 120_000);
 });

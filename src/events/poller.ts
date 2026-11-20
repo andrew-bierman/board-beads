@@ -826,14 +826,7 @@ export function createEventTranslator(deps: TranslatorDeps): EventTranslator {
       const moves =
         deps.codec === undefined
           ? []
-          : taskEvents(
-              deps.codec,
-              row,
-              view,
-              authorFor,
-              ledger,
-              prior ?? null,
-            );
+          : taskEvents(deps.codec, row, view, authorFor, ledger, prior ?? null);
       if (base.kind === "event") {
         return {
           kind: "event",

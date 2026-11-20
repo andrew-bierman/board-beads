@@ -94,6 +94,8 @@ import {
   mvKeyOf,
   newMoveNonce,
   projectTaskView,
+  readMove,
+  readMv,
   TASK_LABEL,
   type TaskMove,
   type TaskMoveEntry,
@@ -105,6 +107,15 @@ import { createHash, randomBytes } from "node:crypto";
 /** The protocol's long-poll ceiling, in seconds, and the safety re-poll. */
 const WAIT_CAP_SECONDS = 300;
 const SAFETY_REPOLL_MS = 30_000;
+
+/**
+ * A move stamp's delivery: how many bounded attempts the trailing write
+ * gets (the transport's own lock retries ride inside each), how long the
+ * retries space themselves (× the attempt number), and the typed loss that
+ * answers when none lands.
+ */
+const STAMP_ATTEMPTS = 3;
+const STAMP_RETRY_BACKOFF_MS = 250;
 
 /** Leases: what a claim gets without asking. The accepted band lives with the record. */
 const LEASE_DEFAULT_S = 900;
@@ -725,21 +736,119 @@ export function createTaskRoutes(
    * record per changed field, each snapshot carrying only the labels written
    * so far — so the record the feed reads the move from always wears the
    * write's whole labels, and the events it carries match on them.
+   *
+   * The stamp carries the move and the nonce it consumes (`<ns>.mv`) in one
+   * patch, so its journal row pairs however the metadata around it moved —
+   * a row speaks its move only when the row's own snapshot pairs them (the
+   * feed's pairing guard, see `taskEvents` in src/events/poller.ts).
+   *
+   * Delivery is verified from the write's own answer — `bd update --json`
+   * answers the issue as the write left it, metadata merged — at no extra
+   * spawn. A stamp that never answered (a crash, a timeout) is retried on
+   * the same nonce — the write is idempotent, and a row that landed under a
+   * nonce the retry repeats says nothing again (the move ledger's). A stamp
+   * that answered unpaired — its nonce's row can never speak, and the
+   * ledger may already hold the unpaired row as the nonce's first sighting
+   * — retries under a FRESH nonce, whose first sighting can only be the
+   * retry's own row. A stamp that cannot land after the attempts answers
+   * typed here: the write it names landed, so the caller must hear that
+   * this feed will not carry its events — never a silent loss.
    */
   async function stampMove(
     id: string,
     actor: string,
     move: TaskMove,
   ): Promise<void> {
-    await store.run(
-      [
-        "update",
-        id,
-        "--metadata",
-        JSON.stringify(movePatch(codec, move)),
-        "--json",
-      ],
-      actor,
+    let nonce = move.n;
+    let lastWord = "the stamp write never answered";
+    for (let attempt = 0; attempt < STAMP_ATTEMPTS; attempt += 1) {
+      if (attempt > 0) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, STAMP_RETRY_BACKOFF_MS * attempt),
+        );
+      }
+      const wearing: TaskMove = { n: nonce, events: move.events };
+      const patch = JSON.stringify({
+        ...movePatch(codec, wearing),
+        [mvKeyOf(ns)]: nonce,
+      });
+      let answered: BdResult | null = null;
+      try {
+        answered = await store.run(
+          ["update", id, "--metadata", patch, "--json"],
+          actor,
+        );
+      } catch (error) {
+        // The write's fate is unknown; the same patch re-lands idempotently,
+        // and a row it already landed says nothing twice (the ledger's).
+        // A freeze answers at once — the routes' tracker_frozen path. A
+        // refusal bd itself classified (a claim race, a lost guard) is not
+        // a stamp's to retry: rethrow for the caller's own mapping.
+        if (
+          error instanceof Error &&
+          (error.name === "BdFrozenError" ||
+            error.name === "BdClaimRaceError" ||
+            error.name === "BdLostGuardError" ||
+            error.name === "BdNotHolderError")
+        ) {
+          throw error;
+        }
+        lastWord = error instanceof Error ? error.message : String(error);
+        continue;
+      }
+      // The write answered: what it left is the truth the journal row
+      // carries. Read the pair back out of the answer's own metadata.
+      const blob = asRecord(
+        (() => {
+          const row = Array.isArray(answered.data)
+            ? asRecord(answered.data[0])
+            : asRecord(answered.data);
+          const metadata = row?.metadata;
+          if (typeof metadata === "string" && metadata !== "") {
+            try {
+              return JSON.parse(metadata) as unknown;
+            } catch {
+              return undefined;
+            }
+          }
+          return metadata;
+        })(),
+      );
+      const stamped = blob === null ? null : readMove(codec, blob);
+      if (
+        stamped !== null &&
+        stamped.n === nonce &&
+        readMv(codec, blob) === nonce
+      ) {
+        return;
+      }
+      if (stamped === null) {
+        // An answer without a readable blob: the write may have landed
+        // whole — read the issue back once before spending a retry.
+        const found = await rowsOf(["list", "--all", "--id", id]);
+        const blobNow = asRecord(found[0]?.metadata);
+        const now = blobNow === null ? null : readMove(codec, blobNow);
+        if (
+          now !== null &&
+          now.n === nonce &&
+          readMv(codec, blobNow) === nonce
+        ) {
+          return;
+        }
+        lastWord = "the stamped write's answer did not read back";
+        continue;
+      }
+      // The move landed beside a consumed nonce that isn't its own: this
+      // nonce's journal row can never pair (and the ledger may hold this
+      // very row as its first sighting). A fresh nonce's first sighting can
+      // only be the retry's own row, so the retry speaks.
+      lastWord = `the stamp landed unpaired (mv ${JSON.stringify(readMv(codec, blob))} beside move ${JSON.stringify(stamped.n)})`;
+      nonce = newMoveNonce();
+    }
+    throw new HttpError(
+      503,
+      "move_not_stamped",
+      `the task write on ${id} landed, but its move (${JSON.stringify(move.events.map((entry) => entry.type))}) could not be stamped after ${STAMP_ATTEMPTS} attempts, so the feed will not carry it: ${lastWord}`,
     );
   }
 
