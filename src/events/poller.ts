@@ -50,6 +50,7 @@ import type {
 import { issueToMessage } from "../model/message.ts";
 import {
   projectTaskView,
+  readMv,
   readMove,
   taskRecordOf,
   type TaskMoveEntry,
@@ -144,7 +145,14 @@ export interface TranslatorDeps {
   holdMs?: number;
 }
 export interface EventTranslator {
-  translate(row: BdJournalRecord): Promise<RowOutcome>;
+  /**
+   * `groupLast` carries the seqs that end their own (issue, write-second)
+   * group in the page being walked — the only rows whose snapshot metadata
+   * is a write's final state. A task move served from any other row of the
+   * group would be a stale copy of an earlier move, so when the set is
+   * given, rows outside it carry no task events.
+   */
+  translate(row: BdJournalRecord, groupLast?: Set<number>): Promise<RowOutcome>;
 }
 /** The transport surface enrichment reads through: the bd module's own. */
 export interface BdReadTransport {
@@ -582,9 +590,17 @@ function taskEvents(
   authorFor: AuthorLookup,
   served: Map<string, string>,
   prior: MessageView | null,
+  groupLast?: Set<number>,
 ): TranslatedEvent[] {
-  const move = readMove(codec, metadataAtRow(row));
+  const metadata = metadataAtRow(row);
+  const move = readMove(codec, metadata);
   if (move === null) return [];
+  // A row that is not the last of its write group carries the metadata as
+  // it stood BEFORE the write — its move is the previous one, whose own
+  // write already served it. The write's final row wears the new move and
+  // the new nonce together (mv), and only that pairing speaks.
+  if (groupLast !== undefined && !groupLast.has(row.seq)) return [];
+  if (readMv(codec, metadata) !== move.n) return [];
   if (served.get(row.issueId) === move.n) return [];
   served.set(row.issueId, move.n);
   const { actor } = writerOf(row, authorFor);
@@ -634,6 +650,23 @@ function bareCreateRow(row: BdJournalRecord): boolean {
     snapshot.issue.metadata === undefined || snapshot.issue.metadata === null
   );
 }
+
+/**
+ * The seqs that end their own (issue, write-second) group in a page of
+ * journal rows: bd journals one multi-part write as a record per changed
+ * field, every snapshot but the group's last carrying the metadata as it
+ * stood before the write got to it. A task move may be served from the
+ * group's last row alone — its snapshots pair the write's own move nonce
+ * with the nonce its record consumed; every other row of the group would
+ * re-serve the previous move.
+ */
+export function groupLastRows(rows: readonly BdJournalRecord[]): Set<number> {
+  const last = new Map<string, number>();
+  for (const row of rows) {
+    last.set(`${row.issueId}\n${row.ts}`, row.seq);
+  }
+  return new Set(last.values());
+}
 export function createEventTranslator(deps: TranslatorDeps): EventTranslator {
   // The hold has to outlast the metadata write's bd latency on a loaded
   // box: a row whose hold expired before its metadata lands is skipped for
@@ -649,7 +682,10 @@ export function createEventTranslator(deps: TranslatorDeps): EventTranslator {
   const holds = new Map<string, number>();
   /** issueId → the nonce of the last task move this consumer served. */
   const served = new Map<string, string>();
-  async function translate(row: BdJournalRecord): Promise<RowOutcome> {
+  async function translate(
+    row: BdJournalRecord,
+    groupLast?: Set<number>,
+  ): Promise<RowOutcome> {
     // dep_add / dep_remove / comment: no-op rows for the feed (their
     // board-visible state arrives in the metadata rows of the same write),
     // and the poller fans their wake signals out before this runs — skip
@@ -730,7 +766,15 @@ export function createEventTranslator(deps: TranslatorDeps): EventTranslator {
       const moves =
         deps.codec === undefined
           ? []
-          : taskEvents(deps.codec, row, view, authorFor, served, prior ?? null);
+          : taskEvents(
+              deps.codec,
+              row,
+              view,
+              authorFor,
+              served,
+              prior ?? null,
+              groupLast,
+            );
       if (base.kind === "event") {
         return {
           kind: "event",
@@ -1059,6 +1103,7 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
           // spawns a held bare create drags per cycle — is work nobody
           // asked for, so the loop just advances its checkpoint.
           const classify = eventSubs.size > 0;
+          const groupLast = groupLastRows(page.events);
           for (const row of page.events) {
             for (const fn of recordSubs) {
               fn({
@@ -1072,7 +1117,7 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
               checkpoint = Math.max(checkpoint, row.seq);
               continue;
             }
-            const outcome = await translator.translate(row);
+            const outcome = await translator.translate(row, groupLast);
             // A held row pins the checkpoint: its classification (a post, or
             // a plain issue) is decided on a later cycle, never skipped.
             if (outcome.kind === "hold") break;

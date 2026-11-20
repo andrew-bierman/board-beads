@@ -273,6 +273,25 @@ export function moveKeyOf(namespace: string): string {
   return `${namespace}.move`;
 }
 
+/**
+ * The metadata key carrying the nonce a task write consumed: a row serves
+ * its move only when this matches the move's own nonce, so the partial
+ * snapshots bd journals around a multi-part write — label rows carrying the
+ * metadata as it stood before it — never re-serve a move whose own write
+ * already served it.
+ */
+export function mvKeyOf(namespace: string): string {
+  return `${namespace}.mv`;
+}
+
+/** Decode a metadata blob's consumed-move nonce, or null. */
+export function readMv(codec: MetadataCodec, metadata: unknown): string | null {
+  const blob = asRecord(metadata);
+  if (blob === null) return null;
+  const mv = blob[mvKeyOf(codec.namespace)];
+  return typeof mv === "string" && mv !== "" ? mv : null;
+}
+
 /** Decode a metadata blob's stamped move, tolerantly, or null. */
 export function readMove(
   codec: MetadataCodec,

@@ -91,9 +91,11 @@ import {
   leaseOutsideBand,
   LEASE_MIN_S,
   movePatch,
+  mvKeyOf,
   newMoveNonce,
   projectTaskView,
   TASK_LABEL,
+  type TaskMove,
   type TaskMoveEntry,
   type TaskRecord,
   type TaskState,
@@ -666,12 +668,15 @@ export function createTaskRoutes(
     task: TaskRecord;
     claim?: MessageMeta["claim"] | null;
     epoch?: number;
+    /** The nonce the write consumed, pairing it with the move that names it. */
+    mv?: string;
     moves?: { add?: string[]; remove?: string[] };
   }): Promise<void> {
     const patch: Record<string, JsonValue> = {
       [taskKey]: encodeTaskRecord(input.task),
     };
     if (input.claim !== undefined) patch[`${ns}.claim`] = input.claim;
+    if (input.mv !== undefined) patch[mvKeyOf(ns)] = input.mv;
     if (input.epoch !== undefined) patch[`${ns}.epoch`] = input.epoch;
     await updateTask(input.id, input.actor, patch, input.moves);
   }
@@ -724,14 +729,14 @@ export function createTaskRoutes(
   async function stampMove(
     id: string,
     actor: string,
-    events: TaskMoveEntry[],
+    move: TaskMove,
   ): Promise<void> {
     await store.run(
       [
         "update",
         id,
         "--metadata",
-        JSON.stringify(movePatch(codec, { n: newMoveNonce(), events })),
+        JSON.stringify(movePatch(codec, move)),
         "--json",
       ],
       actor,
@@ -792,17 +797,20 @@ export function createTaskRoutes(
         .run(["unclaim", id, "--if-assignee", holderSlug, "--json"], holderSlug)
         .catch(() => undefined);
     }
+    const move: TaskMove = {
+      n: newMoveNonce(),
+      events: [{ type: "task.expired", state, from: "claimed" }],
+    };
     await writeTaskState({
       id,
       actor: store.systemActor,
       task: { ...entry.task, state },
       claim: null,
       epoch: entry.meta.epoch,
+      mv: move.n,
       moves: stateMoves(entry.row, state),
     });
-    await stampMove(id, store.systemActor, [
-      { type: "task.expired", state, from: "claimed" },
-    ]);
+    await stampMove(id, store.systemActor, move);
     timers.cancel(id, epoch);
     stopKeepAlive(id, epoch);
     const fresh = await taskEntryById(id);
@@ -956,6 +964,12 @@ export function createTaskRoutes(
         ).toISOString();
         const claim: TaskClaim = { epoch, token: input.token, until };
         const state: TaskState = "claimed";
+        const move: TaskMove = {
+          n: newMoveNonce(),
+          events: [
+            { type: "task.claimed", state: "claimed", from: fresh.task.state },
+          ],
+        };
         await updateTask(
           id,
           slug,
@@ -963,12 +977,11 @@ export function createTaskRoutes(
             [`${ns}.epoch`]: epoch,
             [`${ns}.claim`]: { epoch, token: hashToken(input.token), until },
             [taskKey]: encodeTaskRecord({ ...fresh.task, state }),
+            [mvKeyOf(ns)]: move.n,
           },
           stateMoves(fresh.row, state),
         );
-        await stampMove(id, slug, [
-          { type: "task.claimed", state: "claimed", from: fresh.task.state },
-        ]);
+        await stampMove(id, slug, move);
         timers.arm(id, epoch, Date.parse(until));
         const measured = ttl.ok ? ttl.value.ttlMs : measuredTtlMs;
         if (measured !== null && Date.parse(until) > Date.now() + measured) {
@@ -1631,6 +1644,28 @@ export function createTaskRoutes(
                 );
               }
               record.state = "claimed";
+              const move: TaskMove = {
+                n: newMoveNonce(),
+                events: [
+                  ...(needs.ids.length > 0
+                    ? [
+                        {
+                          type: "task.created",
+                          state: "waiting",
+                        } as TaskMoveEntry,
+                      ]
+                    : [
+                        {
+                          type: "task.created",
+                          state: "ready",
+                        } as TaskMoveEntry,
+                      ]),
+                  ...(needs.ids.length > 0
+                    ? [{ type: "task.ready", state: "ready" } as TaskMoveEntry]
+                    : []),
+                  { type: "task.claimed", state: "claimed" },
+                ],
+              };
               await updateTask(
                 adoptId,
                 slug,
@@ -1642,25 +1677,11 @@ export function createTaskRoutes(
                     token: hashToken(claim.token),
                     until: claim.until,
                   },
+                  [mvKeyOf(ns)]: move.n,
                 },
                 { add: [`${TASK_LABEL}=${record.state}`] },
               );
-              await stampMove(adoptId, slug, [
-                ...(needs.ids.length > 0
-                  ? [
-                      {
-                        type: "task.created",
-                        state: "waiting",
-                      } as TaskMoveEntry,
-                    ]
-                  : [
-                      { type: "task.created", state: "ready" } as TaskMoveEntry,
-                    ]),
-                ...(needs.ids.length > 0
-                  ? [{ type: "task.ready", state: "ready" } as TaskMoveEntry]
-                  : []),
-                { type: "task.claimed", state: "claimed" },
-              ]);
+              await stampMove(adoptId, slug, move);
               timers.arm(adoptId, claim.epoch, Date.parse(claim.until));
               return;
             } catch (error) {
@@ -1677,21 +1698,28 @@ export function createTaskRoutes(
             }
           }
           record.state = await settleState(needs.ids, false);
+          const move: TaskMove = {
+            n: newMoveNonce(),
+            events: [
+              {
+                type: "task.created",
+                state: needs.ids.length > 0 ? "waiting" : "ready",
+              },
+              ...(needs.ids.length > 0 && record.state === "ready"
+                ? [{ type: "task.ready", state: "ready" } as TaskMoveEntry]
+                : []),
+            ],
+          };
           await updateTask(
             adoptId,
             slug,
-            { [taskKey]: encodeTaskRecord(record) },
+            {
+              [taskKey]: encodeTaskRecord(record),
+              [mvKeyOf(ns)]: move.n,
+            },
             { add: [`${TASK_LABEL}=${record.state}`] },
           );
-          await stampMove(adoptId, slug, [
-            {
-              type: "task.created",
-              state: needs.ids.length > 0 ? "waiting" : "ready",
-            },
-            ...(needs.ids.length > 0 && record.state === "ready"
-              ? [{ type: "task.ready", state: "ready" } as TaskMoveEntry]
-              : []),
-          ]);
+          await stampMove(adoptId, slug, move);
         });
         const entry = await taskEntryById(adoptId);
         if (entry === null)
@@ -1871,11 +1899,16 @@ export function createTaskRoutes(
         if (record.state === "claimed") {
           startEvents.push({ type: "task.claimed", state: "claimed" });
         }
+        const move: TaskMove = {
+          n: newMoveNonce(),
+          events: startEvents,
+        };
         const blob: Record<string, JsonValue> = {
           ...encoded.value,
           [`${ns}.seq`]: seq,
           [taskKey]: encodeTaskRecord(record),
           ...claimPatch,
+          [mvKeyOf(ns)]: move.n,
         };
         await store.run(
           [
@@ -1888,7 +1921,7 @@ export function createTaskRoutes(
           ],
           slug,
         );
-        await stampMove(id, slug, startEvents);
+        await stampMove(id, slug, move);
         if (claim !== undefined)
           timers.arm(id, claim.epoch, Date.parse(claim.until));
         const entry = await taskEntryById(id);
@@ -2129,10 +2162,23 @@ export function createTaskRoutes(
             "metadata_too_large",
           );
         }
+        const move: TaskMove = {
+          n: newMoveNonce(),
+          events: [
+            {
+              type: "task.created",
+              state: record.state === "waiting" ? "waiting" : "ready",
+            },
+            ...(record.state === "ready" && record.needs.length > 0
+              ? [{ type: "task.ready", state: "ready" } as TaskMoveEntry]
+              : []),
+          ],
+        };
         const blob: Record<string, JsonValue> = {
           ...encoded.value,
           [`${ns}.seq`]: seq,
           [taskKey]: encodeTaskRecord(record),
+          [mvKeyOf(ns)]: move.n,
         };
         const addLabels = [
           `${ns}.channel=${channel}`,
@@ -2152,15 +2198,7 @@ export function createTaskRoutes(
           ],
           slug,
         );
-        await stampMove(id, slug, [
-          {
-            type: "task.created",
-            state: record.state === "waiting" ? "waiting" : "ready",
-          },
-          ...(record.state === "ready" && record.needs.length > 0
-            ? [{ type: "task.ready", state: "ready" } as TaskMoveEntry]
-            : []),
-        ]);
+        await stampMove(id, slug, move);
         // The needs' edges, native: what the task waits for blocks it — the
         // task depends on its need, so bd's blocker sits on the task.
         for (const need of record.needs) {
@@ -2398,10 +2436,17 @@ export function createTaskRoutes(
               throw trackerFrozen(error);
             throw error;
           }
-          await updateTask(input.id, slug, { [`${ns}.claim`]: claim });
-          await stampMove(input.id, slug, [
-            { type: "task.renewed", state: "claimed", from: "claimed" },
-          ]);
+          const move: TaskMove = {
+            n: newMoveNonce(),
+            events: [
+              { type: "task.renewed", state: "claimed", from: "claimed" },
+            ],
+          };
+          await updateTask(input.id, slug, {
+            [`${ns}.claim`]: claim,
+            [mvKeyOf(ns)]: move.n,
+          });
+          await stampMove(input.id, slug, move);
           timers.arm(input.id, input.epoch, Date.parse(until));
           return until;
         },
@@ -2444,18 +2489,21 @@ export function createTaskRoutes(
           stopKeepAlive(input.id, input.epoch);
           timers.cancel(input.id, input.epoch);
           const state = await settleState(entry.task.needs, false);
+          const move: TaskMove = {
+            n: newMoveNonce(),
+            events: [{ type: "task.released", state, from: "claimed" }],
+          };
           await updateTask(
             input.id,
             slug,
             {
               [`${ns}.claim`]: null,
               [taskKey]: encodeTaskRecord({ ...entry.task, state }),
+              [mvKeyOf(ns)]: move.n,
             },
             stateMoves(entry.row, state),
           );
-          await stampMove(input.id, slug, [
-            { type: "task.released", state, from: "claimed" },
-          ]);
+          await stampMove(input.id, slug, move);
           const fresh = await taskEntryById(input.id);
           if (fresh === null)
             throw internalAt("the released task doesn't read back");
@@ -2505,6 +2553,12 @@ export function createTaskRoutes(
           }
           stopKeepAlive(input.id, input.epoch);
           timers.cancel(input.id, input.epoch);
+          const move: TaskMove = {
+            n: newMoveNonce(),
+            events: [
+              { type: "task.completed", state: "completed", from: "claimed" },
+            ],
+          };
           await updateTask(
             input.id,
             slug,
@@ -2515,12 +2569,11 @@ export function createTaskRoutes(
                 state: "completed",
                 result: input.result ?? null,
               }),
+              [mvKeyOf(ns)]: move.n,
             },
             stateMoves(entry.row, "completed"),
           );
-          await stampMove(input.id, slug, [
-            { type: "task.completed", state: "completed", from: "claimed" },
-          ]);
+          await stampMove(input.id, slug, move);
           const fresh = await taskEntryById(input.id);
           if (fresh === null)
             throw internalAt("the completed task doesn't read back");
@@ -2568,6 +2621,10 @@ export function createTaskRoutes(
           }
           stopKeepAlive(input.id, input.epoch);
           timers.cancel(input.id, input.epoch);
+          const move: TaskMove = {
+            n: newMoveNonce(),
+            events: [{ type: "task.failed", state: "failed", from: "claimed" }],
+          };
           await updateTask(
             input.id,
             slug,
@@ -2578,12 +2635,11 @@ export function createTaskRoutes(
                 state: "failed",
                 reason: input.reason,
               }),
+              [mvKeyOf(ns)]: move.n,
             },
             stateMoves(entry.row, "failed"),
           );
-          await stampMove(input.id, slug, [
-            { type: "task.failed", state: "failed", from: "claimed" },
-          ]);
+          await stampMove(input.id, slug, move);
           const fresh = await taskEntryById(input.id);
           if (fresh === null)
             throw internalAt("the failed task doesn't read back");
@@ -2673,6 +2729,16 @@ export function createTaskRoutes(
                 .catch(() => undefined);
             }
           }
+          const move: TaskMove = {
+            n: newMoveNonce(),
+            events: [
+              {
+                type: "task.blocked",
+                state: "blocked",
+                from: entry.task.state,
+              },
+            ],
+          };
           await updateTask(
             input.id,
             slug,
@@ -2683,12 +2749,11 @@ export function createTaskRoutes(
                 state: "blocked",
                 blocked: { kind: input.kind ?? null, reason: input.reason },
               }),
+              [mvKeyOf(ns)]: move.n,
             },
             stateMoves(entry.row, "blocked"),
           );
-          await stampMove(input.id, slug, [
-            { type: "task.blocked", state: "blocked", from: entry.task.state },
-          ]);
+          await stampMove(input.id, slug, move);
           const fresh = await taskEntryById(input.id);
           if (fresh === null)
             throw internalAt("the blocked task doesn't read back");
@@ -2740,6 +2805,10 @@ export function createTaskRoutes(
           if (state === "ready" && entry.task.needs.length > 0) {
             unblockEvents.push({ type: "task.ready", state: "ready" });
           }
+          const move: TaskMove = {
+            n: newMoveNonce(),
+            events: unblockEvents,
+          };
           await updateTask(
             input.id,
             slug,
@@ -2749,10 +2818,11 @@ export function createTaskRoutes(
                 state,
                 blocked: null,
               }),
+              [mvKeyOf(ns)]: move.n,
             },
             stateMoves(entry.row, state),
           );
-          await stampMove(input.id, slug, unblockEvents);
+          await stampMove(input.id, slug, move);
           const fresh = await taskEntryById(input.id);
           if (fresh === null)
             throw internalAt("the unblocked task doesn't read back");
@@ -2803,6 +2873,10 @@ export function createTaskRoutes(
             ["update", input.id, "--status", "open", "--json"],
             slug,
           );
+          const move: TaskMove = {
+            n: newMoveNonce(),
+            events: [{ type: "task.reopened", state: "ready", from: "failed" }],
+          };
           await updateTask(
             input.id,
             slug,
@@ -2812,12 +2886,11 @@ export function createTaskRoutes(
                 state: "ready",
                 reason: null,
               }),
+              [mvKeyOf(ns)]: move.n,
             },
             stateMoves(entry.row, "ready"),
           );
-          await stampMove(input.id, slug, [
-            { type: "task.reopened", state: "ready", from: "failed" },
-          ]);
+          await stampMove(input.id, slug, move);
           await clearDeps(input.id, entry.task.needs, slug);
           const fresh = await taskEntryById(input.id);
           if (fresh === null)
@@ -2855,16 +2928,21 @@ export function createTaskRoutes(
           const assigned = ownActor(entry.task.owner, input.for);
           if (entry.task.for === assigned) return viewOf(entry);
           // A claim it has stays: assignment says who may claim it next.
+          const move: TaskMove = {
+            n: newMoveNonce(),
+            events: [
+              {
+                type: "task.assigned",
+                state: entry.task.state,
+                from: entry.task.state,
+              },
+            ],
+          };
           await updateTask(input.id, slug, {
             [taskKey]: encodeTaskRecord({ ...entry.task, for: assigned }),
+            [mvKeyOf(ns)]: move.n,
           });
-          await stampMove(input.id, slug, [
-            {
-              type: "task.assigned",
-              state: entry.task.state,
-              from: entry.task.state,
-            },
-          ]);
+          await stampMove(input.id, slug, move);
           const fresh = await taskEntryById(input.id);
           if (fresh === null)
             throw internalAt("the assigned task doesn't read back");
@@ -2939,6 +3017,10 @@ export function createTaskRoutes(
           if (state === "ready" && needs.ids.length > 0 && !blocked) {
             needsEvents.push({ type: "task.ready", state: "ready" });
           }
+          const move: TaskMove = {
+            n: newMoveNonce(),
+            events: needsEvents,
+          };
           await updateTask(
             input.id,
             slug,
@@ -2948,10 +3030,11 @@ export function createTaskRoutes(
                 needs: needs.ids,
                 state,
               }),
+              [mvKeyOf(ns)]: move.n,
             },
             stateMoves(entry.row, state),
           );
-          await stampMove(input.id, slug, needsEvents);
+          await stampMove(input.id, slug, move);
           const fresh = await taskEntryById(input.id);
           if (fresh === null)
             throw internalAt("the task whose needs changed doesn't read back");
@@ -3012,6 +3095,16 @@ export function createTaskRoutes(
             stopKeepAlive(input.id, epoch);
             timers.cancel(input.id, epoch);
           }
+          const move: TaskMove = {
+            n: newMoveNonce(),
+            events: [
+              {
+                type: "task.canceled",
+                state: "canceled",
+                from: entry.task.state,
+              },
+            ],
+          };
           await updateTask(
             input.id,
             slug,
@@ -3022,16 +3115,11 @@ export function createTaskRoutes(
                 state: "canceled",
                 reason: input.reason,
               }),
+              [mvKeyOf(ns)]: move.n,
             },
             stateMoves(entry.row, "canceled"),
           );
-          await stampMove(input.id, slug, [
-            {
-              type: "task.canceled",
-              state: "canceled",
-              from: entry.task.state,
-            },
-          ]);
+          await stampMove(input.id, slug, move);
           await clearDeps(input.id, entry.task.needs, slug);
           const fresh = await taskEntryById(input.id);
           if (fresh === null)
@@ -3125,15 +3213,20 @@ export function createTaskRoutes(
         )
           return;
         if (!(await needsSatisfied(fresh.task.needs))) return;
+        const move: TaskMove = {
+          n: newMoveNonce(),
+          events: [{ type: "task.ready", state: "ready", from: "waiting" }],
+        };
         await updateTask(
           fresh.row.id,
           store.systemActor,
-          { [taskKey]: encodeTaskRecord({ ...fresh.task, state: "ready" }) },
+          {
+            [taskKey]: encodeTaskRecord({ ...fresh.task, state: "ready" }),
+            [mvKeyOf(ns)]: move.n,
+          },
           stateMoves(fresh.row, "ready"),
         );
-        await stampMove(fresh.row.id, store.systemActor, [
-          { type: "task.ready", state: "ready", from: "waiting" },
-        ]);
+        await stampMove(fresh.row.id, store.systemActor, move);
         await clearDeps(fresh.row.id, fresh.task.needs, store.systemActor);
       });
     }

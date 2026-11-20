@@ -43,6 +43,7 @@ import {
   createEventPoller,
   createEventTranslator,
   createMessageLoader,
+  groupLastRows,
   type AuthorLookup,
   type BdReadTransport,
   type EventPoller,
@@ -347,12 +348,13 @@ export function createEventRoutes(deps: EventRouteDeps): EventRoutes {
       return { kind: "truncated", floor: page.floor, head: page.head };
     }
     if (page.kind === "disabled") return { kind: "disabled" };
+    const groupLast = groupLastRows(page.events);
     const matched: BoardEventView[] = [];
     let advanced = base.value;
     let held = false;
     for (const row of page.events) {
       if (row.seq <= advanced) continue;
-      const outcome = await translator.translate(row);
+      const outcome = await translator.translate(row, groupLast);
       // A held row pins the cursor: a bare create may still become a post,
       // and the consumer must not skip past what it cannot yet classify.
       if (outcome.kind === "hold") {
