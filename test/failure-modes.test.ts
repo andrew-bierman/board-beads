@@ -83,7 +83,12 @@ function mountBackend(
   const store = createBoardStore({
     dir,
     bdPath: options.bdPath,
-    timeoutMs: options.timeoutMs,
+    // The unit's per-call convention (90-120s). The transport's 30s default
+    // is a production answer; under the full suite's load (observed at
+    // load ~45) a single bd invocation can exceed it, and the typed 503 it
+    // answers then is correct protocol but a functional-suite flake. The
+    // hung-bd suite passes its own short bound explicitly and is unaffected.
+    timeoutMs: options.timeoutMs ?? 120_000,
   });
   const events = createEventRoutes({
     transport: store.transport,

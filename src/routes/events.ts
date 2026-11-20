@@ -58,6 +58,14 @@ import { guardBdRoute } from "./unavailable.ts";
 /** The protocol's long-poll ceiling, in seconds. */
 const WAIT_CAP_SECONDS = 300;
 const DEFAULT_CADENCE_MS = 500;
+/**
+ * The quiet wait's safety re-poll, for out-of-band journal mutation. The
+ * poller only wakes a reader when rows are APPENDED; retention pruning cuts
+ * rows away silently, and a reader parked past the cut would otherwise
+ * lapse quiet instead of answering its re-baseline error. Once per wait
+ * window (not once per cadence) — this bounds detection, not latency.
+ */
+const SAFETY_QUIET_REPOLL_MS = 30_000;
 
 /** The parsed events query board() hands the backend, exactly as served. */
 export type EventsInput = Parameters<Backend["events"]>[1];
@@ -96,6 +104,22 @@ function invalidAfter(raw: string): HttpError {
     "invalid_cursor",
     `after: ${JSON.stringify(raw)} is not an events cursor`,
     { hint: "pass the cursor a previous events page answered" },
+  );
+}
+
+/** The typed re-baseline answer when retention has cut below a cursor. */
+function truncatedAnswer(
+  cursor: string,
+  floor: number,
+  head: number | null,
+): HttpError {
+  return new HttpError(
+    400,
+    "invalid_cursor",
+    `the events journal was truncated below ${JSON.stringify(cursor)}: records under seq ${floor} are gone`,
+    {
+      hint: "re-baseline: read the feed without `after` (or from its head) and continue from the cursor it answers",
+    },
   );
 }
 
@@ -243,7 +267,16 @@ export function createAnchorResolver(
       if (!asMessage.ok) throw invalidAfter(raw);
     }
     if (id === "0") return "0";
-    if ((await loadMessage(id)) === null) throw invalidAfter(raw);
+    // The read behind `loadMessage` swallows bd failures as nulls (the
+    // enrichment contract), so one slow spawn must not read as a hostile
+    // cursor: a well-formed poll would 400 on a hiccup. Retry briefly
+    // before declaring the id names nothing — a cursor that names
+    // nothing stays null across every attempt.
+    for (let attempt = 0; ; attempt += 1) {
+      if ((await loadMessage(id)) !== null) break;
+      if (attempt >= 2) throw invalidAfter(raw);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
     return postSeqOf(id);
   };
 }
@@ -329,9 +362,12 @@ export function createEventRoutes(deps: EventRouteDeps): EventRoutes {
     // resolution retries on cadence like any other read; a hostile cursor
     // (an HttpError) throws at once and never waits.
     let cursor: string | null = null;
+    /** The caller's own anchor, once resolved: what the probe re-checks. */
+    let anchor: string | null = null;
 
     for (;;) {
-      if (signal.aborted || poller.status === "stopped") {
+      const status = poller.status;
+      if (signal.aborted || status === "stopped") {
         return { events: [], cursor: cursor ?? input.after ?? poller.head() };
       }
       if (cursor === null) {
@@ -346,6 +382,7 @@ export function createEventRoutes(deps: EventRouteDeps): EventRoutes {
           await sleep(Math.min(cadenceMs, deadline - Date.now()));
           continue;
         }
+        anchor = cursor;
       }
       let page: Awaited<ReturnType<typeof readPage>>;
       try {
@@ -359,14 +396,7 @@ export function createEventRoutes(deps: EventRouteDeps): EventRoutes {
         continue;
       }
       if (page.kind === "truncated") {
-        throw new HttpError(
-          400,
-          "invalid_cursor",
-          `the events journal was truncated below ${JSON.stringify(cursor)}: records under seq ${page.floor} are gone`,
-          {
-            hint: "re-baseline: read the feed without `after` (or from its head) and continue from the cursor it answers",
-          },
-        );
+        throw truncatedAnswer(cursor, page.floor, page.head);
       }
       if (page.kind === "disabled") {
         // A never-enabled journal is an empty feed, not an error, and the
@@ -390,11 +420,38 @@ export function createEventRoutes(deps: EventRouteDeps): EventRoutes {
       // cadence sleep is only the fallback — a poller that is not running
       // (or still placing its first checkpoint) — and the re-read a held
       // row wants stays on the cadence too, bounded by the hold window.
+      // A quiet wait lapses on the slow safety re-poll instead: the poller
+      // cannot wake anyone for a write that was PRUNED away, so the wait
+      // must check for that out-of-band cut itself, once per window.
+      const held = page.held || poller.status === "idle";
       const wake = poller.waitBeyond(cursor, remaining, signal);
-      if (page.held || poller.status === "idle") {
-        await Promise.race([wake, sleep(Math.min(cadenceMs, remaining))]);
-      } else {
-        await wake;
+      const woken = await (held
+        ? Promise.race([wake, sleep(Math.min(cadenceMs, remaining))])
+        : Promise.race([
+            wake,
+            sleep(Math.min(SAFETY_QUIET_REPOLL_MS, remaining)),
+          ]));
+      // The safety lapse (not a wake, not a stop) re-checks the caller's
+      // own anchor: bd refuses a read below the retained window, and that
+      // refusal is this poll's typed re-baseline answer. A real wake skips
+      // it — the delivering read refuses on its own when the floor rose
+      // past the cursor.
+      if (
+        !held &&
+        !woken &&
+        !signal.aborted &&
+        poller.status !== "stopped" &&
+        anchor !== null
+      ) {
+        try {
+          const probed = await deps.transport.tailEvents(anchor);
+          if (probed.kind === "truncated") {
+            throw truncatedAnswer(anchor, probed.floor, probed.head);
+          }
+        } catch (error) {
+          if (error instanceof HttpError) throw error;
+          // Any other probe failure is a bd hiccup the next read retries.
+        }
       }
     }
   };

@@ -407,7 +407,17 @@ describe("events long-poll", () => {
   }, 120_000);
 
   test("truncation mid-poll answers invalid_cursor instead of hanging", async () => {
-    const r = await rig({ holdMs: 8_000 });
+    // The hold spans the whole test on purpose. Probed bd behavior
+    // (bd 1.3.4): `events tail --since 0` answers the truncation envelope
+    // once records below the retained floor are pruned, but `--since N ≥ 1`
+    // answers the records above the floor normally — a cursor that has
+    // already risen past the held row can never see the truncation. Under
+    // load the prune (three bd invocations) lands long after a short hold
+    // releases, so the anchor must outlive the prune for the mid-poll
+    // truncation to be observable at all: the waiter stays anchored below
+    // the head, the prune lands whenever it lands, and the next read
+    // answers typed.
+    const r = await rig({ holdMs: 300_000 });
     // A bare create keeps the poll's cursor anchored below the journal head.
     await runOk(r.fixture, [
       "create",
@@ -417,7 +427,7 @@ describe("events long-poll", () => {
       "not a message",
       "--json",
     ]);
-    const pending = events(r, { after: "0", wait: 60 });
+    const pending = events(r, { after: "0", wait: 90 });
     await sleep(500);
     await runOk(r.fixture, [
       "config",
@@ -438,14 +448,14 @@ describe("events long-poll", () => {
       await pending.catch((caught: unknown): unknown => caught),
     );
     // The contract: a mid-poll truncation answers invalid_cursor instead of
-    // hanging, within the wait the caller asked for. The answer fires on the
-    // first completed bd read after the cursor rises above the held row, so
-    // the bound has to absorb one bd invocation on a loaded box (the full
-    // suite runs fixture sets concurrently; at load ~25 a single `bd events`
-    // can take tens of seconds). The semantics are unchanged: it must be
-    // the typed 400, never the empty cap page — that assertion is what
+    // hanging, within the wait the caller asked for. The answer fires on
+    // the first completed bd read after the prune, so the bound has to
+    // absorb the prune's own bd invocations plus one read on a loaded box
+    // (the full suite runs fixture sets concurrently; at load ~25 each bd
+    // call can take tens of seconds). The semantics are unchanged: it must
+    // be the typed 400, never the empty cap page — that assertion is what
     // proves the mechanism, the bound only refuses to hang.
-    expect(Date.now() - started).toBeLessThan(60_000);
+    expect(Date.now() - started).toBeLessThan(90_000);
     expect(error.status).toBe(400);
     expect(error.code).toBe("invalid_cursor");
   }, 120_000);
