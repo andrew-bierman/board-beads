@@ -23,6 +23,7 @@ import { join } from "node:path";
 import {
   BdCorruptOutputError,
   BdCrashError,
+  BdError,
   BdJournalTruncatedError,
   BdTransportError,
   classifyBdExit,
@@ -34,6 +35,26 @@ import { parseBdVersion, type BdVersion } from "./version.ts";
 const DEFAULT_TIMEOUT_MS = 30_000;
 /** How long a timed-out bd gets to exit gracefully (SIGTERM) before SIGKILL. */
 const KILL_GRACE_MS = 1_000;
+/**
+ * How hard one invocation fights a Dolt lock refusal. Dolt serializes a
+ * tracker behind a lock file and bd refuses outright rather than waiting,
+ * so under several concurrent invocations on one tracker (the full suite
+ * runs many fixture trackers at once) a call can lose that race several
+ * times in a row. Each retry re-pays the engine start, which spaces the
+ * attempts on its own; the backoff adds only the refusal path's short
+ * hops. Six attempts rides out multi-second contention windows before the
+ * failure classifies.
+ */
+const LOCK_ATTEMPTS = 6;
+const LOCK_BACKOFF_MS = 250;
+const LOCK_BACKOFF_MAX_MS = 2_000;
+/**
+ * How long a "never recorded" probe answer stands before the next empty
+ * tail asks again — long enough to keep a quiet journal's cadence reads
+ * from paying a config spawn each, short enough that journaling switched
+ * on under a running process is noticed on its next idle cycle.
+ */
+const JOURNAL_PROBE_TTL_MS = 10_000;
 
 /** Options for constructing a transport. */
 export interface BdTransportOptions {
@@ -428,6 +449,19 @@ export class BdTransport {
   readonly #bin: string;
   readonly #timeoutMs: number;
   readonly #journal: boolean;
+  /**
+   * The journalEnabled probe answers, cached: once the journal has
+   * recorded (a records page came through, or the probe said true) it can
+   * never be "never enabled" again, so true is remembered for good; the
+   * false answer rides a short TTL so the workspace can turn journaling on
+   * under a running process and still be noticed. The cache exists because
+   * every empty tail read would otherwise pay a second bd spawn — the
+   * config read — and a quiet journal's tail is exactly what the poller
+   * reads on its cadence, so an uncached probe doubles a live backend's
+   * idle spawn pressure on the tracker's lock.
+   */
+  #journalEnabledTrue = false;
+  #journalProbeNotBefore = 0;
 
   constructor(options: BdTransportOptions) {
     if (options.dir === "") {
@@ -448,6 +482,14 @@ export class BdTransport {
    * machinery. This is the only place a bd process is ever spawned: escape
    * hatches (config reads, queries) route through here so they inherit the
    * typed error contract.
+   *
+   * Dolt serializes a tracker behind a lock file, and bd refuses outright
+   * ("database is locked by another dolt process") rather than waiting its
+   * turn — under several concurrent invocations on one tracker (the journal
+   * consumer's tail beside a route's own write, say) an invocation can lose
+   * that race. The refusal is bd failing to load the database at all, so no
+   * op has run: a short bounded retry is safe for reads and writes alike.
+   * Every other classification keeps its one-shot semantics.
    */
   async run(
     args: readonly string[],
@@ -458,6 +500,36 @@ export class BdTransport {
     } = {},
   ): Promise<BdResult> {
     const command = ["bd", ...args].join(" ");
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await this.#attempt(args, command, options);
+      } catch (error) {
+        const locked =
+          error instanceof BdError &&
+          /database is locked by another dolt process/i.test(error.message);
+        if (!locked || attempt >= LOCK_ATTEMPTS - 1) throw error;
+        // Exponential hops with jitter, capped: the attempts also space
+        // themselves by the engine start each one pays, so the jitter only
+        // keeps a burst of concurrent callers from retrying in lockstep.
+        const hop = Math.min(
+          LOCK_BACKOFF_MAX_MS,
+          LOCK_BACKOFF_MS * 2 ** attempt,
+        );
+        const jitter = Math.round(hop * (0.7 + 0.6 * Math.random()));
+        await new Promise((resolve) => setTimeout(resolve, jitter));
+      }
+    }
+  }
+
+  /** One spawn-and-classify attempt, shared by the lock-retry loop. */
+  async #attempt(
+    args: readonly string[],
+    command: string,
+    options: {
+      extraEnv?: Readonly<Record<string, string>>;
+      omitEnv?: readonly string[];
+    },
+  ): Promise<BdResult> {
     const outcome = await this.#exec(
       args,
       options.extraEnv ?? {},
@@ -649,12 +721,24 @@ export class BdTransport {
     const events = parseJournalRecords(command, result.raw);
     if (events.length === 0) {
       // An empty tail is ambiguous: caught up on an enabled journal, or
-      // a journal that has never recorded. Ask bd which.
-      const enabled = await this.journalEnabled();
-      return enabled
-        ? { kind: "records", cursor, events }
-        : { kind: "disabled" };
+      // a journal that has never recorded. Ask bd which — unless the
+      // answer is already known (see the field notes above).
+      if (!this.#journalEnabledTrue) {
+        if (Date.now() < this.#journalProbeNotBefore) {
+          return { kind: "disabled" };
+        }
+        const enabled = await this.journalEnabled();
+        if (!enabled) {
+          this.#journalProbeNotBefore = Date.now() + JOURNAL_PROBE_TTL_MS;
+          return { kind: "disabled" };
+        }
+        this.#journalEnabledTrue = true;
+      }
+      return { kind: "records", cursor, events };
     }
+    // Rows exist, so the journal has recorded: the never-enabled answer is
+    // off the table for the rest of this transport's life.
+    this.#journalEnabledTrue = true;
     const gap = truncationFromGap(since, events);
     if (gap) return { kind: "truncated", floor: gap.floor, head: gap.head };
     const last = events.at(-1);

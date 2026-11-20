@@ -119,15 +119,22 @@ export function beads(options: BeadsBackendOptions): Backend {
     bdPath: options.bdPath,
     systemActor: options.systemActor,
     namespace: options.labels?.namespace,
+    timeoutMs: options.timeoutMs,
   });
   // The event feed: the long-poll over the journal, with the consumer that
   // keeps the backend's own seq checkpoint (its `head` is what a read with
-  // no `after` continues from).
+  // no `after` continues from). `holdMs` is how long a bare create may wait
+  // for its metadata write to land before the feed settles it as
+  // not-a-message: this deployment's bd invocations run seconds apiece
+  // under load, well past the 2s default, so a post's metadata write would
+  // otherwise land after its create row was given up on and the posted
+  // event would never fire.
   const events = createEventRoutes({
     transport: store.transport,
     codec: store.codec,
     labels: store.labels,
     authorFor: (slug) => store.authorForSlug(slug),
+    holdMs: 10_000,
   });
   const watchers = createWatcherRoutes({ store });
   const sync = createSyncRoutes({ store });

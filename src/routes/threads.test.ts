@@ -41,7 +41,7 @@ describe("threads and messages routes (real bd, mounted through board())", () =>
 
   test("boots the fixture and mounts beads({ dir }) under board()", async () => {
     fixture = await createBdFixture();
-    backend = beads({ dir: fixture.dir });
+    backend = beads({ dir: fixture.dir, timeoutMs: 120_000 });
     team = board({ backend });
   }, 120_000);
 
@@ -441,7 +441,9 @@ describe("threads and messages routes (real bd, mounted through board())", () =>
   }, 90_000);
 
   test("a new backend instance over the same dir still serves everything", async () => {
-    board2 = board({ backend: beads({ dir: fixture.dir }) });
+    board2 = board({
+      backend: beads({ dir: fixture.dir, timeoutMs: 120_000 }),
+    });
     const page = await board2.threads({ channel: "dev" });
     expect(page.threads.length).toBeGreaterThan(0);
     const me = await board2.me();
@@ -549,7 +551,10 @@ describe("threads and messages routes (real bd, mounted through board())", () =>
           event.type === "message.posted" && event.message?.id === waker.id,
       ),
     ).toBeTrue();
-  }, 120_000);
+    // The budget is deliberately generous: under the full suite's load each
+    // bd invocation runs seconds, and a test killed mid-poll leaves bd
+    // children whose stale dolt locks 503 the tests after it.
+  }, 240_000);
 
   test("hostile inputs answer typed 4xx/501, never 500 internal", async () => {
     const made = await team.post("hostile", "hostile target");

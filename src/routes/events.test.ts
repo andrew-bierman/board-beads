@@ -52,6 +52,10 @@ async function rig(options?: {
     dir: fixture.dir,
     actor: "events-test",
     journal: options?.journalWrites ?? true,
+    // The unit's per-call convention: the full suite runs fixture sets
+    // concurrently, and a bd invocation on a loaded box can outlast the
+    // 30s default outright.
+    timeoutMs: 120_000,
   });
   const routes = createEventRoutes({
     transport,

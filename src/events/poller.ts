@@ -454,8 +454,29 @@ function labelsAtRow(row: BdJournalRecord): string[] | null {
  * translator instance serves one consumer; the feed and the poller each
  * carry their own.
  */
+/**
+ * Whether a create row's own snapshot is bare: it names the issue but
+ * carries no metadata — the write's board half has not landed (or never
+ * will). A post's create row looks exactly like this in the journal, since
+ * the metadata commits in the rows right after; a re-walk that replays the
+ * row can only classify it from state the consumer already holds, or by
+ * paying an as-now read for the answer it already has.
+ */
+function bareCreateRow(row: BdJournalRecord): boolean {
+  const snapshot = snapshotOf(row);
+  if (snapshot === null) return false;
+  return (
+    snapshot.issue.metadata === undefined || snapshot.issue.metadata === null
+  );
+}
+
 export function createEventTranslator(deps: TranslatorDeps): EventTranslator {
-  const holdMs = deps.holdMs ?? 2_000;
+  // The hold has to outlast the metadata write's bd latency on a loaded
+  // box: a row whose hold expired before its metadata lands is skipped for
+  // good, and the posted event is never deliverable. Ten seconds rides
+  // above the write latency the loaded full suite produces (a bare create
+  // that never becomes a message still settles, one hold window later).
+  const holdMs = deps.holdMs ?? 10_000;
   const authorFor =
     deps.authorFor ?? ((): MessageAuthorIdentity | null => null);
   /** issueId → the message as the consumer last classified it. */
@@ -476,6 +497,14 @@ export function createEventTranslator(deps: TranslatorDeps): EventTranslator {
       return { kind: "noop" };
     }
     const prior = seen.get(row.issueId) ?? null;
+    // A replayed bare create the consumer has already classified: the
+    // cached state answers the row, no spawn spent. Every walk from below
+    // the create row would otherwise re-read the issue live for an answer
+    // this consumer already holds — on a loaded box that is two bd
+    // invocations per row per walk, and from-zero walks replay rows.
+    if (row.op === "create" && prior !== null && bareCreateRow(row)) {
+      return { kind: "event", view: postedEvent(row, prior, authorFor) };
+    }
     const view = await deps.loadMessage(row.issueId, row);
 
     if (view === null) {
@@ -682,6 +711,13 @@ interface Waiter {
 
 export function createEventPoller(deps: EventPollerDeps): EventPoller {
   const cadenceMs = deps.cadenceMs ?? 250;
+  /**
+   * The idle floor: how slow a quiet, unheard journal may tick. Nobody
+   * waiting on the head and nobody classifying rows means the loop only
+   * keeps its checkpoint fresh out of politeness, and a second between
+   * reads costs nothing but that.
+   */
+  const IDLE_CADENCE_FLOOR_MS = 1_000;
   const translator = createEventTranslator(deps);
   let status: PollerStatus = "idle";
   let rawHead = "0";
@@ -705,6 +741,35 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
     (info: { floor: number; head: number | null }) => void
   >();
   const waiters = new Set<Waiter>();
+  /** Whether the next cycle runs on the tight cadence or the idle one. */
+  let tightScheduled = true;
+
+  /**
+   * The idle cadence: what a quiet journal costs between reads when nobody
+   * waits on the head and nobody classifies rows. Every waiting long-poll
+   * (and every subscriber) drops the loop back to the tight cadence at
+   * once, so wake latency never absorbs the stretch.
+   */
+  const idleCadenceMs = Math.max(cadenceMs, IDLE_CADENCE_FLOOR_MS);
+
+  /** Schedule the loop's next cycle at the tight or the idle cadence. */
+  function scheduleNext(tight: boolean): void {
+    if (timer !== undefined) clearTimeout(timer);
+    tightScheduled = tight;
+    timer = setTimeout(
+      () => {
+        timer = undefined;
+        if (!stopped && pending === null) void runCycle();
+      },
+      tight ? cadenceMs : idleCadenceMs,
+    );
+    timer.unref?.();
+  }
+
+  /** Whether anyone consumes what a cycle produces beyond the raw head. */
+  function someoneListening(): boolean {
+    return waiters.size > 0 || eventSubs.size > 0 || truncatedSubs.size > 0;
+  }
 
   function rawHeadNumber(): number {
     const value = Number(rawHead);
@@ -734,6 +799,8 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
   function runCycle(): Promise<void> {
     if (pending !== null) return pending;
     pending = (async () => {
+      /** Whether the cycle read rows: the tight cadence follows movement. */
+      let moved = false;
       try {
         if (checkpoint === null) {
           // Start at the head: one probe read places the checkpoint past
@@ -748,6 +815,7 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
             rawHead = probe.cursor;
             const head = Number(probe.cursor);
             checkpoint = Number.isSafeInteger(head) && head > 0 ? head : 0;
+            moved = true;
             wakeWaiters();
             return;
           }
@@ -755,6 +823,7 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
             status = "truncated";
             rawHead = String(probe.head ?? probe.floor);
             checkpoint = Math.max(0, probe.floor - 1);
+            moved = true;
             for (const fn of truncatedSubs)
               fn({ floor: probe.floor, head: probe.head });
             wakeWaiters();
@@ -780,6 +849,13 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
         if (page.kind === "records") {
           status = "live";
           rawHead = page.cursor;
+          moved = page.events.length > 0;
+          // Row classification serves this poller's own subscribers; the
+          // feed's readers and the claim scans consume only the raw head.
+          // With nobody listening, translating rows — and the enrichment
+          // spawns a held bare create drags per cycle — is work nobody
+          // asked for, so the loop just advances its checkpoint.
+          const classify = eventSubs.size > 0;
           for (const row of page.events) {
             for (const fn of recordSubs) {
               fn({
@@ -788,6 +864,10 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
                 issueId: row.issueId,
                 actor: row.actor,
               });
+            }
+            if (!classify) {
+              checkpoint = Math.max(checkpoint, row.seq);
+              continue;
             }
             const outcome = await translator.translate(row);
             // A held row pins the checkpoint: its classification (a post, or
@@ -805,6 +885,7 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
           status = "truncated";
           rawHead = String(page.head ?? page.floor);
           checkpoint = Math.max(0, Math.max(checkpoint, page.floor - 1));
+          moved = true;
           for (const fn of truncatedSubs)
             fn({ floor: page.floor, head: page.head });
           wakeWaiters();
@@ -831,6 +912,11 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
         // consumer never crashes on one bad invocation.
       } finally {
         pending = null;
+        // The loop self-schedules: a cycle that saw movement — or that has
+        // anyone waiting on it — is followed by the tight cadence; a quiet
+        // one nobody waits on drops to the idle cadence until a waiter or
+        // a subscriber asks for freshness again.
+        if (!stopped) scheduleNext(moved || someoneListening());
       }
     })();
     return pending;
@@ -844,17 +930,13 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
   function start(): void {
     if (stopped || timer !== undefined) return;
     void runCycle();
-    timer = setInterval(() => {
-      if (pending === null) void runCycle();
-    }, cadenceMs);
-    // A backend that closes without stop() must not hold the loop open.
-    timer.unref?.();
+    scheduleNext(true);
   }
 
   async function stop(): Promise<void> {
     stopped = true;
     if (timer !== undefined) {
-      clearInterval(timer);
+      clearTimeout(timer);
       timer = undefined;
     }
     for (const waiter of [...waiters]) release(waiter, false);
@@ -875,6 +957,8 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
     if (signal?.aborted || stopped || waitMs <= 0)
       return Promise.resolve(false);
     if (rawHeadNumber() > from) return Promise.resolve(true);
+    // A waiter asks for freshness: the loop runs at the tight cadence again.
+    if (!tightScheduled) scheduleNext(true);
     return new Promise((resolve) => {
       const waiter: Waiter = {
         cursor: from,
@@ -894,11 +978,13 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
 
   function onRecord(fn: (signal: JournalSignal) => void): () => void {
     recordSubs.add(fn);
+    if (!tightScheduled) scheduleNext(true);
     return () => recordSubs.delete(fn);
   }
 
   function onEvent(fn: (view: BoardEventView) => void): () => void {
     eventSubs.add(fn);
+    if (!tightScheduled) scheduleNext(true);
     return () => eventSubs.delete(fn);
   }
 
@@ -906,6 +992,7 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
     fn: (info: { floor: number; head: number | null }) => void,
   ): () => void {
     truncatedSubs.add(fn);
+    if (!tightScheduled) scheduleNext(true);
     return () => truncatedSubs.delete(fn);
   }
 

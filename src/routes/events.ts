@@ -57,7 +57,14 @@ import { guardBdRoute } from "./unavailable.ts";
 
 /** The protocol's long-poll ceiling, in seconds. */
 const WAIT_CAP_SECONDS = 300;
-const DEFAULT_CADENCE_MS = 500;
+/**
+ * The quiet wait's re-poll cadence, and how a held row's re-read spaces
+ * itself. The running poller is the wake source for a waiting read, so
+ * this bounds idle latency, not throughput — and every tick is a bd spawn
+ * against the tracker's lock, so it stays at a spawn rate the full suite's
+ * many live backends can sustain (the watchers matcher idles at 1s).
+ */
+const DEFAULT_CADENCE_MS = 1_000;
 /**
  * The quiet wait's safety re-poll, for out-of-band journal mutation. The
  * poller only wakes a reader when rows are APPENDED; retention pruning cuts
