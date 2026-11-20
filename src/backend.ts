@@ -20,6 +20,7 @@ import {
   type ProtocolMethods,
 } from "@vercel/board";
 import { createEventRoutes } from "./routes/events.ts";
+import { createSchemaRoutes } from "./routes/schemas.ts";
 import { createSyncRoutes } from "./routes/sync.ts";
 import { createTaskRoutes } from "./routes/tasks.ts";
 import { createWatcherRoutes } from "./routes/watchers.ts";
@@ -38,9 +39,9 @@ export interface BeadsBackendOptions extends BoardStoreOptions {
  * The protocol families this build keeps none of, per the plan's declared
  * 501 set. Route groups leave this table inert as their units land: a landed
  * method is skipped here (the `except` set), so an entry only answers for
- * methods its family hasn't landed — today that is every family but tasks,
- * which is wired whole. Conformance counts a 501 there as a failure, not a
- * skip, for `events`, `watchers`, and `sync`.
+ * methods its family hasn't landed — today that is every family but tasks
+ * and schemas, which are wired whole. Conformance counts a 501 there as a
+ * failure, not a skip, for `events`, `watchers`, and `sync`.
  */
 const REFUSED: readonly {
   code: string;
@@ -85,11 +86,6 @@ const REFUSED: readonly {
       "explain",
       "revokeGrant",
     ],
-  },
-  {
-    code: "no_schemas",
-    message: "this board keeps no schemas",
-    methods: ["schemas", "schema", "createSchema"],
   },
   {
     code: "no_files",
@@ -139,6 +135,8 @@ export function beads(options: BeadsBackendOptions): Backend {
   });
   const watchers = createWatcherRoutes({ store });
   const sync = createSyncRoutes({ store });
+  // The schema registry: the definitions board() holds blocks against.
+  const schemas = createSchemaRoutes({ store });
   // The task surface: claims, leases, and the batch, with the feed's poller
   // as the waiting claim scans' wake source (any journaled write moves its
   // head; the scans' own safety re-poll bounds out-of-band writers).
@@ -149,6 +147,7 @@ export function beads(options: BeadsBackendOptions): Backend {
     ...watchers.routes,
     ...sync.routes,
     ...tasks,
+    ...schemas.routes,
   };
   const landed = new Set(Object.keys(routes));
   const backend: Backend = {
