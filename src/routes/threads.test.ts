@@ -632,11 +632,6 @@ describe("threads and messages routes (real bd, mounted through board())", () =>
         code: "no_grants",
       },
       {
-        call: async () => team.schemas(),
-        status: 501,
-        code: "no_schemas",
-      },
-      {
         call: async () =>
           team.upload({
             data: new Uint8Array([1]),

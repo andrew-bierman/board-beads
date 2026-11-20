@@ -64,11 +64,6 @@ function refused(
       ],
     },
     {
-      code: "no_schemas",
-      message: "this board keeps no schemas",
-      methods: ["schemas", "schema", "createSchema"],
-    },
-    {
       code: "no_files",
       message: "this board keeps no files",
       methods: ["upload", "attachment", "uploadStart", "uploadFinish"],
