@@ -61,6 +61,7 @@ import {
   deriveActorSlug,
   mapPrincipal,
 } from "../model/actors.ts";
+import { findBlocks, type FoundBlock } from "@vercel/board/schemas";
 import {
   compareThreadBoundary,
   decodeMessageCursor,

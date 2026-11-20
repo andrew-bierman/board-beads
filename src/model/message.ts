@@ -15,7 +15,19 @@ import type {
   ThreadCapability,
 } from "./types.ts";
 import type { MessageView } from "@vercel/board";
+import { findBlocks } from "@vercel/board/schemas";
 import { randomUUID } from "node:crypto";
+
+/** A fence that names a schema and holds a JSON object, as clients see it. */
+function blocksOf(text: string): MessageView["blocks"] {
+  return findBlocks(text)
+    .filter((block) => block.data !== undefined)
+    .map((block) => ({
+      schema: block.name ?? block.id,
+      version: block.version ?? 1,
+      data: block.data as Record<string, unknown>,
+    }));
+}
 
 /** Longest derived title, in code points, plus the ellipsis when cut. */
 const TITLE_MAX = 72;
@@ -116,7 +128,7 @@ export function issueToMessage(
       undelivered: {},
       attachments: [],
       links: [],
-      blocks: [],
+      blocks: blocksOf(issue.description ?? ""),
       version: meta.version,
       revision: meta.revision,
       author: identity?.view ?? null,

@@ -64,6 +64,17 @@ not a preference.
 - `bd events tail` emits bare records (`{seq, ts, op, issue_id, actor, issue}`);
   `bd update --metadata` merges keys; `dep add --type replies-to` works on 1.3.4
   despite missing from its help text.
+- Journal row shapes (probed against the official 1.3.4 release binary, issue
+  #11): row `ts` is second-precision, so one write's rows can straddle a
+  second boundary and two writes can share one. A multi-part update journals
+  one row per changed field, each snapshot wearing the metadata **as written
+  so far** — a write's early rows can wear the previous write's move (paired
+  or not), and a write that moves no metadata journals rows wearing the
+  whole previous state. A metadata-only write journals a single row with the
+  fresh metadata. `bd update --json` answers the issue as the write left it,
+  metadata merged, as an object or a one-element array. Consumers therefore
+  pair a move to its row by the stamp's own nonce (see `src/tasks/record.ts`
+  `mvKeyOf`), never by row grouping or timestamps.
 
 ## Releases
 
