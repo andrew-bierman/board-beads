@@ -23,18 +23,18 @@ Source of truth for the suite, cited below as `kit L<line>`:
 
 **18 passed / 16 failed / 57 skipped** of 91 — vs the stub's **2 / 36 / 53**.
 
-| group | total | stub (P/F/S) | real beads (P/F/S) | delta |
-| --- | --- | --- | --- | --- |
-| `core` | 29 | 2 / 22 / 5 | 15 / 8 / 6 | 13 more pass; 14 fewer fail; +1 skip (the sanctioned `last`-read skip, §5) |
-| `paging` | 2 | 0 / 2 / 0 | **2 / 0 / 0** | fully green — `older` back-paging and the before+after 400 both pass |
-| `search` | 2 | 0 / 1 / 1 | 0 / 0 / 2 | the fail became a real 501 skip: beads declares text/pattern threads unsupported |
-| `schedules` | 2 | 0 / 2 / 0 | 0 / 0 / 2 | the fails were `needRoot` artifacts; now clean `no_scheduler` skips |
-| `tasks` | 24 | 0 / 0 / 24 | 0 / 0 / 24 | unchanged, 501 `no_tasks` skips (unit in flight) |
-| `grants` | 14 | 0 / 0 / 14 | 0 / 0 / 14 | unchanged, 501 `no_grants` skips (unit in flight) |
-| `schemas` | 5 | 0 / 1 / 4 | 0 / 1 / 4 | unchanged — the one check that cannot skip on 501 (inventory §3.3) still fails |
-| `attachments` | 3 | 0 / 0 / 3 | 0 / 0 / 3 | unchanged, 501 `no_files` skips |
-| `watchers` | 3 | 0 / 2 / 1 | 0 / 2 / 1 | **expected** — unit in flight; 501 fails |
-| `sync` | 7 | 0 / 6 / 1 | **1** / 5 / 1 | "keeps noSync on a post and a reply" now **passes** (rides threads, no registration) |
+| group         | total | stub (P/F/S) | real beads (P/F/S) | delta                                                                                |
+| ------------- | ----- | ------------ | ------------------ | ------------------------------------------------------------------------------------ |
+| `core`        | 29    | 2 / 22 / 5   | 15 / 8 / 6         | 13 more pass; 14 fewer fail; +1 skip (the sanctioned `last`-read skip, §5)           |
+| `paging`      | 2     | 0 / 2 / 0    | **2 / 0 / 0**      | fully green — `older` back-paging and the before+after 400 both pass                 |
+| `search`      | 2     | 0 / 1 / 1    | 0 / 0 / 2          | the fail became a real 501 skip: beads declares text/pattern threads unsupported     |
+| `schedules`   | 2     | 0 / 2 / 0    | 0 / 0 / 2          | the fails were `needRoot` artifacts; now clean `no_scheduler` skips                  |
+| `tasks`       | 24    | 0 / 0 / 24   | 0 / 0 / 24         | unchanged, 501 `no_tasks` skips (unit in flight)                                     |
+| `grants`      | 14    | 0 / 0 / 14   | 0 / 0 / 14         | unchanged, 501 `no_grants` skips (unit in flight)                                    |
+| `schemas`     | 5     | 0 / 1 / 4    | 0 / 1 / 4          | unchanged — the one check that cannot skip on 501 (inventory §3.3) still fails       |
+| `attachments` | 3     | 0 / 0 / 3    | 0 / 0 / 3          | unchanged, 501 `no_files` skips                                                      |
+| `watchers`    | 3     | 0 / 2 / 1    | 0 / 2 / 1          | **expected** — unit in flight; 501 fails                                             |
+| `sync`        | 7     | 0 / 6 / 1    | **1** / 5 / 1      | "keeps noSync on a post and a reply" now **passes** (rides threads, no registration) |
 
 Reads and writes are real: posts, replies, reply fencing (409 `newer_message`, incl. the 3-way race),
 client-ID idempotency, revision-fenced edits/deletes (incl. the edit race), cursor paging of
@@ -164,6 +164,7 @@ as in the stub run.
 `me.principal` unchanged, `me.can` the parsed can (kit L880-895). One line in the harness's
 `conformance(...)` call: `withCan: (can) => board({ backend }).as(null, { can })`. What they'd then
 require of beads:
+
 - core "narrows a caller..." — reads allowed, post → 403 `forbidden`. The routes already narrow via
   `caller.can` (`identityOf` narrows FULL_ACCESS, threads.ts L399-400), so this should pass once
   wired.

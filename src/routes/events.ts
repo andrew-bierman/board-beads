@@ -47,7 +47,11 @@ import {
   type BdReadTransport,
   type EventPoller,
 } from "../events/poller.ts";
-import { decodeEventCursor, decodeMessageCursor, decodeOlderCursor } from "../model/cursors.ts";
+import {
+  decodeEventCursor,
+  decodeMessageCursor,
+  decodeOlderCursor,
+} from "../model/cursors.ts";
 import type { LabelsApi, MetadataCodec } from "../model/types.ts";
 
 /** The protocol's long-poll ceiling, in seconds. */
@@ -205,7 +209,11 @@ export function createAnchorResolver(
       }
       let matched: number | null = null;
       for (const row of page.events) {
-        if (matched === null && row.op === "create" && row.issueId === issueId) {
+        if (
+          matched === null &&
+          row.op === "create" &&
+          row.issueId === issueId
+        ) {
           matched = row.seq;
         }
       }
