@@ -7,7 +7,7 @@ SemVer during early development.
 License: MPL-2.0. Requires Node ≥ 22.18 and `bd` ≥ 1.3.4, < 2 (the `bd` range
 is checked when the backend binds).
 
-## 0.2.0 — unreleased
+## 0.2.0 — 2026-11-20
 
 The first backend release: `beads()` returns a working Board Backend backed by
 a beads tracker, conformance-tested against Board's own conformance suite.

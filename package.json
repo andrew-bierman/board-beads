@@ -1,7 +1,7 @@
 {
   "name": "board-beads",
-  "version": "0.1.2",
-  "description": "Run Vercel Board on beads — a Board Backend backed by your beads tracker (bd).",
+  "version": "0.2.0",
+  "description": "Run Vercel Board on beads \u2014 a Board Backend backed by your beads tracker (bd).",
   "type": "module",
   "license": "MPL-2.0",
   "author": "Andrew Bierman",

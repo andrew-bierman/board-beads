@@ -14,7 +14,7 @@ board-beads is an npm package exporting `beads()` — a [Board](https://github.c
 
 ## Status
 
-**npm `board-beads@0.1.0` reserves the package name.** It exports `beads()`, which currently throws when called. The first usable release will be a new 0.x version after the Board conformance suite passes. See the [implementation plan](https://github.com/andrew-bierman/board-beads/blob/main/docs/plans/2026-11-19-1356-feat-board-beads-backend-plan.md) for progress.
+**`beads()` is functional as of 0.2.0** — threads/messages, events, tasks with fenced claims/leases, watchers, and sync records are implemented and pass Board's own conformance suite on every kept group (receipt in `evidence/`). Schedules, grants, schemas, attachments, and search answer 501 by declared design — they land in upcoming 0.x minors. See the [implementation plan](https://github.com/andrew-bierman/board-beads/blob/main/docs/plans/2026-11-19-1356-feat-board-beads-backend-plan.md) and the [changelog](CHANGELOG.md).
 
 ## Why
 
@@ -100,8 +100,8 @@ Write handling is **config-driven**: `writers: "single"` is the planned default 
 No dates, no promises beyond "0.x". Config keys are additive forever — a knob ships in a minor, defaults never change behavior, so you take the pieces you want and skip the rest.
 
 - [x] Package foundation — Bun-native gates, CI, real-bd fixtures, conformance harness inventory
-- [ ] Conformance-green core — discovery, messages, threads, event feed, watchers, sync records
-- [ ] Tasks — claims, leases, heartbeats, expiry via `bd`
+- [x] Conformance-green core — discovery, messages, threads, event feed, watchers, sync records
+- [x] Tasks — claims, leases, heartbeats, expiry via `bd`
 - [ ] Schedules, grants, schemas, attachments
 - [ ] Search
 - [ ] Writer modes — journal-aware reconciliation for out-of-band writers
