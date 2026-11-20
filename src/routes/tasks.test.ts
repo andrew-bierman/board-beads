@@ -400,7 +400,7 @@ describe("tasks routes (real bd, mounted through board())", () => {
     // never the task's maker (which `by` still is, and neither racer is).
     expect(winner.task.task?.claim?.actor).not.toBe(winner.task.by.actor);
     expect(["board:client:racer-a", "board:client:racer-b"]).toContain(
-      winner.task.task?.claim?.actor,
+      winner.task.task?.claim?.actor ?? "",
     );
     // bd itself holds exactly one assignee (the winner's mapped slug): a
     // single non-empty holder at the tracker, whatever the actor id shows.
@@ -617,9 +617,13 @@ describe("tasks routes (real bd, mounted through board())", () => {
     expect(other.status).toBe(409);
     expect(other.code).toBe("duplicate_id");
     // An id that made no batch is not found.
-    const missing = await routes
-      .createdTasks(CALLER, { id: "batch-never-made" })
-      .catch((error: unknown) => error);
+    const createdTasks = routes.createdTasks;
+    if (createdTasks === undefined) throw new Error("createdTasks not kept");
+    const missing = await createdTasks(
+      CALLER,
+      { id: "batch-never-made" },
+      new AbortController().signal,
+    ).catch((error: unknown) => error);
     expect(missing).toBeInstanceOf(HttpError);
     expect((missing as HttpError).status).toBe(404);
     expect((missing as HttpError).code).toBe("batch_not_found");
