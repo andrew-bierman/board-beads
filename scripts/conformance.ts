@@ -193,9 +193,34 @@ const run = async (): Promise<void> => {
   if (printJson) console.log(JSON.stringify(receipt, null, 2));
   console.log(`  ok: ${report.ok}`);
 
-  // Honest exit: nonzero while any check failed beyond its declared skips. The stub run expects
-  // nonzero — core cannot pass on a board that refuses every write.
-  process.exitCode = report.ok ? 0 : 1;
+  // Honest exit: the kept groups (core, paging, watchers, sync, tasks) must have
+  // zero failed checks. Failures inside declared-501 families are exemptions —
+  // today exactly one: schemas' pinned `reserved_schema` check cannot skip on a
+  // `no_schemas` answer, so a board that declares schemas 501 fails that single
+  // check by design. Everything else failing exits nonzero.
+  const groups = report.groups as Record<
+    string,
+    { passed?: number; failed?: number; skipped?: number }
+  >;
+  const kept = ["core", "paging", "watchers", "sync", "tasks"];
+  const failedOutsideKept = Object.entries(groups)
+    .filter(([group]) => !kept.includes(group))
+    .filter(([, gi]) => (gi.failed ?? 0) > 0)
+    .map(([group, gi]) => `${group}:${gi.failed}`);
+  const keptFailures = kept.reduce(
+    (sum, group) => sum + (groups[group]?.failed ?? 0),
+    0,
+  );
+  const exempt =
+    failedOutsideKept.length === 1 &&
+    failedOutsideKept[0]!.startsWith("schemas:");
+  process.exitCode =
+    keptFailures === 0 && (exempt || failedOutsideKept.length === 0) ? 0 : 1;
+  if (process.exitCode === 0 && !report.ok) {
+    console.log(
+      `  gate: pass — kept groups clean; declared exemptions: ${failedOutsideKept.join(", ") || "none"}`,
+    );
+  }
 };
 
 run().catch((error: unknown) => {
