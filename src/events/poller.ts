@@ -730,6 +730,14 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
    * consumer waits on.
    */
   let checkpoint: number | null = null;
+  /**
+   * Whether the journal has ever ANSWERED a tail here (a records page —
+   * empty counts: an enabled-but-empty journal answers records with a "0"
+   * cursor). Only a tail that names itself disabled may say this workspace
+   * never recorded; once the journal has answered, its empty reads are a
+   * caught-up consumer, and the status stays live.
+   */
+  let journalEnabledSeen = false;
   let timer: NodeJS.Timeout | undefined;
   let stopped = false;
   /** The tail cycle in flight, if any; set at its start, cleared at its end. */
@@ -812,6 +820,10 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
           if (stopped) return;
           if (probe.kind === "records") {
             status = "live";
+            // An empty records page still says the journal is enabled: it
+            // answered the tail, it just has no rows yet. Only a tail that
+            // names itself disabled may.
+            journalEnabledSeen = true;
             rawHead = probe.cursor;
             const head = Number(probe.cursor);
             checkpoint = Number.isSafeInteger(head) && head > 0 ? head : 0;
@@ -848,6 +860,10 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
         if (stopped) return;
         if (page.kind === "records") {
           status = "live";
+          // A caught-up read is the journal answering, not the journal
+          // being absent: only a tail that names itself disabled may say
+          // this workspace never recorded.
+          journalEnabledSeen = true;
           rawHead = page.cursor;
           moved = page.events.length > 0;
           // Row classification serves this poller's own subscribers; the
@@ -891,13 +907,14 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
           wakeWaiters();
           return;
         }
-        if (checkpoint === 0) {
-          // Nothing was ever classified: an empty read here really is a
-          // journal that has never recorded. Past a nonzero checkpoint the
-          // same read is just a caught-up consumer — this backend journals
-          // writes through the per-process flag, so the workspace config
-          // being off does not make the feed disabled.
+        // A journal that has never recorded gets one more look — journaling
+        // can turn on under this process. A journal that has ANSWERED
+        // before (journalEnabledSeen) is enabled: its empty reads are a
+        // caught-up consumer, never a disabled state, whatever the
+        // checkpoint says.
+        if (!journalEnabledSeen) {
           status = "disabled";
+          checkpoint = 0;
           if (!warnings.some((entry) => entry.code === "journal_disabled")) {
             warnings.push({
               code: "journal_disabled",
@@ -907,6 +924,7 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
             });
           }
         }
+        return;
       } catch {
         // A failed read keeps the checkpoint and retries next cadence; the
         // consumer never crashes on one bad invocation.
