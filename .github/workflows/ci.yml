@@ -52,7 +52,7 @@ jobs:
       - name: Build
         run: bun run build
 
-      # U8 makes conformance required for main and PRs. Release tags already require it.
+      # Conformance is required everywhere — the real beads backend passes the
+      # kept groups; schemas' pinned reserved_schema check is the declared exemption.
       - name: Conformance suite
-        run: bun run conformance
-        continue-on-error: ${{ github.ref_type != 'tag' }}
+        run: bun run conformance -- --backend beads
