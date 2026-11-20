@@ -198,7 +198,7 @@ const run = async (): Promise<void> => {
   // today exactly one: schemas' pinned `reserved_schema` check cannot skip on a
   // `no_schemas` answer, so a board that declares schemas 501 fails that single
   // check by design. Everything else failing exits nonzero.
-  const groups = report.groups as Record<
+  const groups = summaryOf(report) as unknown as Record<
     string,
     { passed?: number; failed?: number; skipped?: number }
   >;

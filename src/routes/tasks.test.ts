@@ -936,4 +936,82 @@ describe("tasks routes (real bd, mounted through board())", () => {
       finished.task.id,
     );
   }, 180_000);
+
+  test("a lease outside the board's band is refused before anything is read", async () => {
+    const { team } = await boot();
+    const made = await team.tasks.create("t-band", {
+      text: "a task to lease badly",
+    });
+    for (const bad of [5, 3, 0, 3601]) {
+      const claim = await errorOf(
+        team.tasks.claim(made.task.id, { lease: bad }),
+      );
+      expect(claim.status).toBe(400);
+      expect(claim.code).toBe("invalid_request");
+    }
+    // Renewal and the ready-task claim answer the same refusal.
+    const held = await team.tasks.claim(made.task.id, { lease: 60 });
+    const renew = await errorOf(held.renew(5));
+    expect(renew.status).toBe(400);
+    expect(renew.code).toBe("invalid_request");
+    const queued = await errorOf(
+      team.tasks.claim({ channel: "t-band", label: {}, lease: 5 }),
+    );
+    expect(queued.status).toBe(400);
+    expect(queued.code).toBe("invalid_request");
+    await held.release();
+    // And a create that would claim with a bad lease never makes the task.
+    const bad = await errorOf(
+      team.tasks.create("t-band", {
+        text: "never made",
+        claim: true,
+        lease: 5,
+      }),
+    );
+    expect(bad.status).toBe(400);
+    expect(bad.code).toBe("invalid_request");
+  }, 180_000);
+
+  test("a task create is made once for a client ID, and an ID something else landed with is another write's", async () => {
+    const { team } = await boot();
+    const first = await team.tasks.create("t-once", {
+      text: "made once",
+      id: "conformance-once",
+    });
+    const again = await team.tasks.create("t-once", {
+      text: "made once",
+      id: "conformance-once",
+    });
+    expect(again.task.id).toBe(first.task.id);
+
+    // A reply and a plain thread landed under their own IDs: a task create
+    // under either is refused, and makes nothing.
+    const replied = await team.reply(first.task.id, {
+      text: "a reply with an ID",
+      id: "conformance-once-reply",
+    });
+    const plain = await team.post("t-once", {
+      text: "a thread with an ID",
+      id: "conformance-once-thread",
+    });
+    const underReply = await errorOf(
+      team.tasks.create("t-once", {
+        text: "never made under a reply's ID",
+        id: "conformance-once-reply",
+      }),
+    );
+    expect(underReply.status).toBe(409);
+    expect(underReply.code).toBe("duplicate_id");
+    const underThread = await errorOf(
+      team.tasks.create("t-once", {
+        text: "never made under a thread's ID",
+        id: "conformance-once-thread",
+      }),
+    );
+    expect(underThread.status).toBe(409);
+    expect(underThread.code).toBe("duplicate_id");
+    // The plain thread is still no task.
+    const read = await team.thread(plain.id);
+    expect(read.message.task).toBeUndefined();
+  }, 180_000);
 });

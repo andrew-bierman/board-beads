@@ -21,6 +21,7 @@ import {
 } from "@vercel/board";
 import { createEventRoutes } from "./routes/events.ts";
 import { createSyncRoutes } from "./routes/sync.ts";
+import { createTaskRoutes } from "./routes/tasks.ts";
 import { createWatcherRoutes } from "./routes/watchers.ts";
 import {
   createBoardStore,
@@ -35,11 +36,11 @@ export interface BeadsBackendOptions extends BoardStoreOptions {
 
 /**
  * The protocol families this build keeps none of, per the plan's declared
- * 501 set. Route groups leave this table as their units land: `events` is
- * wired (it is a core method, so refusing it fails conformance); watchers
- * and sync are wired with theirs — conformance counts a 501 there as a
- * failure, not a skip. Tasks stay refused until their landing is assigned:
- * the family is declared optional, and the tests are the contract.
+ * 501 set. Route groups leave this table inert as their units land: a landed
+ * method is skipped here (the `except` set), so an entry only answers for
+ * methods its family hasn't landed — today that is every family but tasks,
+ * which is wired whole. Conformance counts a 501 there as a failure, not a
+ * skip, for `events`, `watchers`, and `sync`.
  */
 const REFUSED: readonly {
   code: string;
@@ -138,11 +139,16 @@ export function beads(options: BeadsBackendOptions): Backend {
   });
   const watchers = createWatcherRoutes({ store });
   const sync = createSyncRoutes({ store });
+  // The task surface: claims, leases, and the batch, with the feed's poller
+  // as the waiting claim scans' wake source (any journaled write moves its
+  // head; the scans' own safety re-poll bounds out-of-band writers).
+  const tasks = createTaskRoutes({ store, poller: events.poller });
   const routes = {
     ...threadsRoutes(store),
     events: events.events,
     ...watchers.routes,
     ...sync.routes,
+    ...tasks,
   };
   const landed = new Set(Object.keys(routes));
   const backend: Backend = {
