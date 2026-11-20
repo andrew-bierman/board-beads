@@ -2,8 +2,8 @@
   "backend": "beads",
   "bdVersion": "1.3.4",
   "suite": "@vercel/board/conformance",
-  "startedAt": "2026-11-20T09:16:07.193Z",
-  "finishedAt": "2026-11-20T09:19:38.707Z",
+  "startedAt": "2026-11-20T10:37:44.215Z",
+  "finishedAt": "2026-11-20T10:47:09.695Z",
   "url": "http://in-process.board",
   "ok": false,
   "summary": {
@@ -32,9 +32,9 @@
       "total": 2
     },
     "tasks": {
-      "passed": 0,
-      "failed": 0,
-      "skipped": 24,
+      "passed": 7,
+      "failed": 13,
+      "skipped": 4,
       "total": 24
     },
     "grants": {
@@ -257,98 +257,92 @@
     {
       "group": "tasks",
       "name": "starts a thread as a task, or makes one of a thread that was there: it reads as its thread, and board.task finds it",
-      "status": "skipped",
-      "detail": "not kept here: this board keeps no tasks"
+      "status": "failed",
+      "detail": "the task, read as its thread: expected \"ready\", got undefined"
     },
     {
       "group": "tasks",
       "name": "makes a task once for a client ID, and none under an ID a reply or a plain thread landed with",
-      "status": "skipped",
-      "detail": "not kept here: this board keeps no tasks"
+      "status": "failed",
+      "detail": "the second task with the same client ID: expected \"tracker-dt9\", got \"tracker-d97\""
     },
     {
       "group": "tasks",
       "name": "gives a task to one of the claims that race for it, and takes its result",
-      "status": "skipped",
-      "detail": "not kept here: this board keeps no tasks"
+      "status": "passed"
     },
     {
       "group": "tasks",
       "name": "gives a claim the lease it asks for, up to 5 minutes, and says when it ends",
-      "status": "skipped",
-      "detail": "not kept here: this board keeps no tasks"
+      "status": "failed",
+      "detail": "a lease under 30 seconds: expected 400 invalid_request, and it succeeded"
     },
     {
       "group": "tasks",
       "name": "fences what a claim does: once it's over, its writes are lost and change nothing",
-      "status": "skipped",
-      "detail": "not kept here: this board keeps no tasks"
+      "status": "failed",
+      "detail": "the task, after a write with the wrong token: expected \"claimed\", got undefined"
     },
     {
       "group": "tasks",
       "name": "holds a task until the tasks it needs complete, which a failed or canceled one never does",
-      "status": "skipped",
-      "detail": "not kept here: this board keeps no tasks"
+      "status": "failed",
+      "detail": "the task, once what it needs failed: expected \"waiting\", got undefined"
     },
     {
       "group": "tasks",
       "name": "refuses a prerequisite that was canceled, which can never complete, and takes one that failed",
-      "status": "skipped",
-      "detail": "not kept here: this board keeps no tasks"
+      "status": "passed"
     },
     {
       "group": "tasks",
       "name": "lists the tasks that wait for one in the channel a list names, or its subtree, and no other",
-      "status": "skipped",
-      "detail": "not kept here: this board keeps no tasks"
+      "status": "passed"
     },
     {
       "group": "tasks",
       "name": "lists the last active tasks with latest, wherever they come in the order they were made",
-      "status": "skipped",
-      "detail": "not kept here: this board keeps no tasks"
+      "status": "passed"
     },
     {
       "group": "tasks",
       "name": "says task.ready each time a task that needs others becomes ready: right after it is made or unblocked, once they have completed",
-      "status": "skipped",
-      "detail": "not kept here: this board keeps no tasks"
+      "status": "failed",
+      "detail": "the changes of a task made and unblocked once what it needs completed, with its state after each: expected [[\"task.created\",\"waiting\"],[\"task.ready\",\"ready\"],[\"task.claimed\",\"claimed\"],[\"task.blocked\",\"blocked\"],[\"task.unblocked\",\"waiting\"],[\"task.ready\",\"ready\"]], got []"
     },
     {
       "group": "tasks",
       "name": "changes what a task needs: it waits for the new ones, is ready once they have completed, and at once with none",
-      "status": "skipped",
-      "detail": "not kept here: this board keeps no tasks"
+      "status": "failed",
+      "detail": "the changes of a task whose needs changed, with its state after each: expected [[\"task.needs_changed\",\"waiting\"],[\"task.needs_changed\",\"waiting\"],[\"task.ready\",\"ready\"],[\"task.needs_changed\",\"waiting\"],[\"task.needs_changed\",\"ready\"],[\"task.blocked\",\"blocked\"],[\"task.needs_changed\",\"blocked\"],[\"task.unblocked\",\"waiting\"],[\"task.ready\",\"ready\"]], got []"
     },
     {
       "group": "tasks",
       "name": "refuses a change of needs that would make a task wait for itself, straight back or through others",
-      "status": "skipped",
-      "detail": "not kept here: this board keeps no tasks"
+      "status": "failed",
+      "detail": "the task, after the refused changes: expected \"ready\", got undefined"
     },
     {
       "group": "tasks",
       "name": "changes what a task needs only while no one holds it and it has not finished",
-      "status": "skipped",
-      "detail": "not kept here: this board keeps no tasks"
+      "status": "failed",
+      "detail": "the task, after the refused change: expected \"claimed\", got undefined"
     },
     {
       "group": "tasks",
       "name": "makes several tasks in one write, in the order given: each waits for the ones it names, of the batch or there already, and an id makes them once",
-      "status": "skipped",
-      "detail": "not kept here: this board keeps no tasks"
+      "status": "failed",
+      "detail": "a batched task, read as its thread: expected \"waiting\", got undefined"
     },
     {
       "group": "tasks",
       "name": "makes none of a batch when one of its tasks can not be made, wherever it comes in it",
-      "status": "skipped",
-      "detail": "not kept here: this board keeps no tasks"
+      "status": "passed"
     },
     {
       "group": "tasks",
       "name": "holds a task for a person, by its owner or its claim, and gives it back when unblocked",
-      "status": "skipped",
-      "detail": "not kept here: this board keeps no tasks"
+      "status": "passed"
     },
     {
       "group": "tasks",
@@ -360,43 +354,42 @@
       "group": "tasks",
       "name": "lets a profile change only the tasks it made, and its principal all of them",
       "status": "skipped",
-      "detail": "not kept here: this board keeps no tasks"
+      "detail": "this run can't call the board with headers of its own"
     },
     {
       "group": "tasks",
       "name": "takes label in its channel to claim a task: a caller narrowed to reading and posting claims none",
       "status": "skipped",
-      "detail": "not kept here: this board keeps no tasks"
+      "detail": "this run can't call the board with an x-board-can header"
     },
     {
       "group": "tasks",
       "name": "takes read in a prerequisite's channel to wait for it: a caller narrowed out of it makes no task that needs it",
       "status": "skipped",
-      "detail": "not kept here: this board keeps no tasks"
+      "detail": "this run can't call the board with an x-board-can header"
     },
     {
       "group": "tasks",
       "name": "claims the oldest ready task in a channel or its subtree that has the labels asked for, and waits for one",
-      "status": "skipped",
-      "detail": "not kept here: this board keeps no tasks"
+      "status": "passed"
     },
     {
       "group": "tasks",
       "name": "shows a feed that filters on board.task=ready a task becoming ready and being claimed, and never a token",
-      "status": "skipped",
-      "detail": "not kept here: this board keeps no tasks"
+      "status": "failed",
+      "detail": "the feed should show the task become ready, within a few seconds"
     },
     {
       "group": "tasks",
       "name": "keeps labels under board. its own: a label write or a post that sets one is refused",
-      "status": "skipped",
-      "detail": "not kept here: this board keeps no tasks"
+      "status": "failed",
+      "detail": "the task, after the refused writes: expected \"ready\", got undefined"
     },
     {
       "group": "tasks",
       "name": "holds a task when anyone but its owner edits its root, which ends its claim",
-      "status": "skipped",
-      "detail": "not kept here: this board keeps no tasks"
+      "status": "failed",
+      "detail": "the task, once its root was edited by someone else: expected \"blocked\", got undefined"
     },
     {
       "group": "grants",
@@ -528,7 +521,7 @@
       "group": "attachments",
       "name": "starts a task with a file, which its root carries",
       "status": "skipped",
-      "detail": "not kept here: this board keeps no tasks"
+      "detail": "not kept here: this board keeps no files"
     },
     {
       "group": "watchers",

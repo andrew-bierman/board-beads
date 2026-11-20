@@ -617,16 +617,6 @@ describe("threads and messages routes (real bd, mounted through board())", () =>
         code: "not_supported",
       },
       {
-        call: async () => team.tasks.list(),
-        status: 501,
-        code: "no_tasks",
-      },
-      {
-        call: async () => team.tasks.create("hostile", "a task"),
-        status: 501,
-        code: "no_tasks",
-      },
-      {
         call: async () => team.schedule("hostile", { text: "later", in: "1h" }),
         status: 501,
         code: "no_scheduler",
@@ -679,5 +669,108 @@ describe("threads and messages routes (real bd, mounted through board())", () =>
     // And the plain reads keep working afterwards: nothing corrupted the tracker.
     const page = await team.threads({ channel: "hostile" });
     expect(page.threads).toHaveLength(1);
+  }, 180_000);
+
+  test("a task reads as its thread: the thread view projects the task's state, claim, and needs", async () => {
+    const made = await team.tasks.create("t-view", {
+      text: "a task read as its thread",
+    });
+    expect(made.task.task?.state).toBe("ready");
+    // The same read through the threads surface — the seam the conformance
+    // kit reads and the unit rig answered through tasks.list instead.
+    const thread = await team.thread(made.task.id);
+    expect(thread.message.task?.state).toBe("ready");
+    expect(thread.message.task?.owner).toBe("board:client");
+    expect(thread.message.labels["board.task"]).toBe("ready");
+
+    const waiter = await team.tasks.create("t-view", {
+      text: "a task that waits for it",
+      needs: [made.task.id],
+    });
+    const waiting = await team.thread(waiter.task.id);
+    expect(waiting.message.task?.state).toBe("waiting");
+    expect(waiting.message.task?.needs).toEqual([made.task.id]);
+    // A claim shows on the thread read too, holder and until, never a token.
+    const claim = await team.tasks.claim(made.task.id, { lease: 60 });
+    const claimed = await team.thread(made.task.id);
+    expect(claimed.message.task?.state).toBe("claimed");
+    expect(claimed.message.task?.claim?.actor).toBe("board:client");
+    expect(claimed.message.task?.claim?.until).toBe(claim.until);
+    expect(JSON.stringify(claimed.message.task)).not.toContain(claim.token);
+    // A thread that is no task carries no task at all.
+    const plain = await team.post("t-view", "not a task");
+    expect((await team.thread(plain.id)).message.task).toBeUndefined();
+    await claim.release();
+  }, 180_000);
+
+  test("an edit of a task's root by anyone but its owner holds it and ends its claim", async () => {
+    // A profile writes the thread; its principal makes it a task. The
+    // profile is the root's author, so its edit passes the author gate —
+    // and it is not the task's maker, so the edit holds the task as
+    // `edited`, which ends the claim. This is the rule both the threads
+    // edit route and a sync import edit serve (one shared write guard).
+    const writer = team.as("writer");
+    const thread = await writer.post(
+      "t-edit",
+      "a profile's thread, made a task by its principal",
+    );
+    const made = await team.tasks.create({ re: thread.id });
+    expect(made.task.task?.by).toBe("board:client");
+    const claim = await team.tasks.claim(made.task.id, { lease: 60 });
+    await writer.edit(thread.id, "edited by the profile that wrote it");
+    const edited = await team.thread(thread.id);
+    expect(edited.message.task?.state).toBe("blocked");
+    expect(edited.message.task?.blocked?.kind).toBe("edited");
+    const lost = await errorOf(claim.complete("conformance: too late"));
+    expect(lost.status).toBe(409);
+    expect(lost.code).toBe("claim_lost");
+    // The owner lifts the hold: ready again.
+    const unblocked = await team.tasks.unblock(made.task.id);
+    expect(unblocked.task?.state).toBe("ready");
+    await team.tasks.cancel(made.task.id, "done checking");
+  }, 180_000);
+
+  test("the feed carries a task's state moves, and a board.task=ready filter still sees the claim", async () => {
+    const anchor = (await team.poll({ channel: "t-feed" })).cursor;
+    const first = await team.tasks.create("t-feed", {
+      text: "a prerequisite to watch",
+      labels: { conformance: "feed" },
+    });
+    const second = await team.tasks.create("t-feed", {
+      text: "a task to watch become ready",
+      labels: { conformance: "feed" },
+      needs: [first.task.id],
+    });
+    await (await team.tasks.claim(first.task.id, { lease: 60 })).complete();
+    // The readying lands on the feed with the state after each event.
+    const readyPage = await team.poll({
+      channel: "t-feed",
+      after: anchor,
+      wait: 8,
+    });
+    const ready = readyPage.events.find(
+      (event) =>
+        event.type === "task.ready" && event.message?.id === second.task.id,
+    );
+    expect(ready).toBeTruthy();
+    expect(ready?.message?.task?.state).toBe("ready");
+    // The filter taken before the claim still shows the claim: the event
+    // matches on the labels before it or after it.
+    const claim = await team.tasks.claim(second.task.id, { lease: 60 });
+    const claimedPage = await team.poll({
+      channel: "t-feed",
+      after: anchor,
+      label: ["conformance=feed", "board.task=ready"],
+      wait: 8,
+    });
+    const claimed = claimedPage.events.find(
+      (event) =>
+        event.type === "task.claimed" && event.message?.id === second.task.id,
+    );
+    expect(claimed).toBeTruthy();
+    expect(claimed?.message?.task?.state).toBe("claimed");
+    // And a claim's token shows nowhere on the feed.
+    expect(JSON.stringify(claimedPage.events)).not.toContain(claim.token);
+    await claim.release();
   }, 180_000);
 });

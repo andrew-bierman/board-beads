@@ -98,6 +98,17 @@ import type {
   MessageMeta,
   MetadataCodec,
 } from "../model/types.ts";
+import {
+  encodeTaskRecord,
+  holdableByEdit,
+  movePatch,
+  newMoveNonce,
+  projectTaskView,
+  taskRecordOf,
+  TASK_LABEL,
+  type TaskMoveEntry,
+  type TaskRecord,
+} from "../tasks/record.ts";
 
 /**
  * A message's text bound, as Board holds it. Long text belongs in a file with
@@ -171,6 +182,8 @@ interface IssueRow {
   labels: string[];
   /** The backend-assigned sequence from the metadata blob, 0 when absent. */
   seq: number;
+  /** bd's assignee slug (a task's live claim holder), null when unassigned. */
+  assignee: string | null;
 }
 
 /** A row that decodes as a readable message: the issue, its labels, its metadata. */
@@ -296,6 +309,10 @@ function decodeRow(codec: MetadataCodec, raw: unknown): IssueRow | null {
     },
     labels,
     seq,
+    assignee:
+      typeof row.assignee === "string" && row.assignee !== ""
+        ? row.assignee
+        : null,
   };
 }
 
@@ -496,7 +513,7 @@ function ensureTextPresent(text: string): void {
 export function createBoardStore(options: BoardStoreOptions): BoardStore {
   const codec = createMetadataCodec({ namespace: options.namespace });
   const labels = createLabels({ namespace: codec.namespace });
-  const gate = createWriteGate();
+  const gate0 = createWriteGate();
   const systemActor = options.systemActor ?? "board-beads";
   const transport = new BdTransport({
     dir: options.dir,
@@ -514,6 +531,27 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
   };
   let binding: BoardBinding | null = null;
   let ready: Promise<void> | null = null;
+
+  /**
+   * The issue keys whose gate an op currently holds. The task write guard
+   * (below) runs inside `run`, which callers invoke both bare and from
+   * within a gated op; re-entering the same gate would chain on itself and
+   * never run, so a guard that fires under the holder's own gate skips the
+   * acquisition — the holder already serializes the issue.
+   */
+  const gating = new Set<string>();
+  const gate: WriteGate = {
+    run(key, op) {
+      return gate0.run(key, async () => {
+        gating.add(key);
+        try {
+          return await op();
+        } finally {
+          gating.delete(key);
+        }
+      });
+    },
+  };
 
   /** Never-throwing runner shaped for the model's capability probe. */
   const probeRun = async (args: string[]): Promise<BdRunResult> => {
@@ -648,6 +686,191 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
     return value === undefined ? null : value;
   };
 
+  // ---------------------------------------------------------------------------
+  // The task write guard: an edit of a task's root by anyone but its owner
+  // holds the task (which ends its claim), and a delete of one cancels it —
+  // whichever surface wrote the change. The threads edit route and the sync
+  // import both land their text writes through `run` as an `update` carrying
+  // `--description`, so this one seam covers both, exactly as Board's own
+  // engine holds a task when its root's text changes under it: the task says
+  // what its owner read, so it waits for them to read it again. One already
+  // held or finished stays as it is.
+  // ---------------------------------------------------------------------------
+
+  /** Why a task is held once its root was edited by someone who doesn't own it. */
+  const EDITED_REASON =
+    "its text was edited by someone who does not own the task";
+
+  /** The task's current `board.task` bd label, if it wears one. */
+  const taskLabelOn = (labels: readonly string[]): string | null => {
+    for (const label of labels) {
+      if (label === TASK_LABEL || label.startsWith(`${TASK_LABEL}=`)) {
+        return label;
+      }
+    }
+    return null;
+  };
+
+  /** Best-effort: clear bd's half of the claim, so the task is claimable at once. */
+  const dropBdClaim = async (
+    id: string,
+    holder: string | null,
+  ): Promise<void> => {
+    if (holder !== null) {
+      const guarded = await store
+        .run(["unclaim", id, "--if-assignee", holder, "--json"], holder)
+        .catch(() => null);
+      if (guarded !== null) return;
+    }
+    await store
+      .run(["unclaim", id, "--force", "--json"], systemActor)
+      .catch(() => undefined);
+  };
+
+  /**
+   * Land a task-record flip beside the message metadata: bd merges metadata
+   * keys, so the patch carries only the task's keys and the label moves.
+   * The move rides a trailing write of its own (stampMove's reasoning: bd
+   * journals a multi-part update one record per field, each snapshot with
+   * only the labels written so far, and the feed reads the move from a
+   * record that wears the write's whole labels).
+   */
+  const flipTaskRecord = async (
+    id: string,
+    record: TaskRecord,
+    moves: { add: string[]; remove: string[] },
+    move: TaskMoveEntry[],
+  ): Promise<void> => {
+    await store.run(
+      [
+        "update",
+        id,
+        "--metadata",
+        JSON.stringify({
+          [`${codec.namespace}.task`]: encodeTaskRecord(record),
+          [`${codec.namespace}.claim`]: null,
+        }),
+        ...moves.add.flatMap((label) => ["--add-label", label]),
+        ...moves.remove.flatMap((label) => ["--remove-label", label]),
+        "--json",
+      ],
+      systemActor,
+    );
+    await stampMove(id, move);
+  };
+
+  /** The trailing move stamp (the feed's `task.*` events for the flip). */
+  const stampMove = async (
+    id: string,
+    events: TaskMoveEntry[],
+  ): Promise<void> => {
+    await store.run(
+      [
+        "update",
+        id,
+        "--metadata",
+        JSON.stringify(movePatch(codec, { n: newMoveNonce(), events })),
+        "--json",
+      ],
+      systemActor,
+    );
+  };
+
+  /** The text a text-write (`update <id> --description=…`) carries, or null. */
+  function textUpdateOf(args: readonly string[]): string | null {
+    if (args[0] !== "update") return null;
+    for (const arg of args) {
+      if (arg === "--description") return "";
+      if (arg.startsWith("--description=")) {
+        return arg.slice("--description=".length);
+      }
+    }
+    return null;
+  }
+
+  /** Whether `card` is who the task's record names as its maker. */
+  const madeTheTask = (
+    card: {
+      actor: string;
+      principal: string;
+      profile: string | null;
+      kind: string;
+    } | null,
+    record: TaskRecord,
+  ): boolean =>
+    card !== null &&
+    card.kind !== "external" &&
+    card.principal === record.owner &&
+    (card.profile === null || record.by === card.actor);
+
+  /**
+   * The guard proper, best-effort and never throwing: the primary write has
+   * landed by the time this runs, and a flip that could not land must not
+   * fail the caller's edit — the next look at the task still sees it.
+   */
+  const taskWriteGuard = async (
+    id: string,
+    actor: string,
+    description: string,
+  ): Promise<void> => {
+    const apply = async (): Promise<void> => {
+      const entry = await store.entryById(id);
+      if (entry === null || entry.meta.thread !== id) return;
+      const record = taskRecordOf(codec, entry.row.issue.metadata);
+      if (record === null) return;
+      const card = parseCard(cardRaw(actor));
+      if (description === "") {
+        // A delete: the tombstone cancels the task, before the labels go.
+        if (record.state === "completed" || record.state === "canceled") {
+          return;
+        }
+        await dropBdClaim(id, entry.row.assignee);
+        const current = taskLabelOn(entry.row.labels);
+        await flipTaskRecord(
+          id,
+          { ...record, state: "canceled", reason: "deleted" },
+          {
+            add:
+              current === `${TASK_LABEL}=canceled`
+                ? []
+                : [`${TASK_LABEL}=canceled`],
+            remove: current === null ? [] : [current],
+          },
+          [{ type: "task.canceled", state: "canceled", from: record.state }],
+        );
+        return;
+      }
+      if (!holdableByEdit(record.state)) return;
+      if (madeTheTask(card, record)) return;
+      await dropBdClaim(id, entry.row.assignee);
+      const current = taskLabelOn(entry.row.labels);
+      await flipTaskRecord(
+        id,
+        {
+          ...record,
+          state: "blocked",
+          blocked: { kind: "edited", reason: EDITED_REASON },
+        },
+        {
+          add:
+            current === `${TASK_LABEL}=blocked`
+              ? []
+              : [`${TASK_LABEL}=blocked`],
+          remove: current === null ? [] : [current],
+        },
+        [{ type: "task.blocked", state: "blocked", from: record.state }],
+      );
+    };
+    // Under the issue's own gate when the caller already holds it; otherwise
+    // take it, so the flip lands serialized against the task's own writes.
+    const key = `issue:${id}`;
+    if (gating.has(key)) {
+      await apply().catch(() => undefined);
+      return;
+    }
+    await gate0.run(key, () => apply().catch(() => undefined));
+  };
+
   const parseCard = (raw: string | null): ActorCard | null => {
     if (raw === null) return null;
     let parsed: unknown;
@@ -735,10 +958,27 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
         throw bdUnavailable(error);
       }
     },
-    run: (args, actor) =>
-      actor === undefined
-        ? transport.run(args)
-        : transport.run(args, { extraEnv: { BEADS_ACTOR: actor } }),
+    run: async (args, actor) => {
+      const result =
+        actor === undefined
+          ? await transport.run(args)
+          : await transport.run(args, { extraEnv: { BEADS_ACTOR: actor } });
+      // The task write guard: a text write (an `update` that carries
+      // `--description`) to a task's root holds or cancels the task when the
+      // rules say so, whichever surface wrote it. System writes skip it.
+      const description = textUpdateOf(args);
+      if (
+        description !== null &&
+        actor !== undefined &&
+        actor !== systemActor
+      ) {
+        const id = args[1];
+        if (typeof id === "string" && id !== "") {
+          await taskWriteGuard(id, actor, description).catch(() => undefined);
+        }
+      }
+      return result;
+    },
     probeRun,
     rows,
     async rowById(id: string): Promise<IssueRow | null> {
@@ -755,13 +995,27 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
         .filter((entry): entry is MessageEntry => entry !== null)
         .sort((a, b) => bySeq(a.row, b.row));
     },
-    view: (entry: MessageEntry) =>
-      issueToMessage(entry.row.issue, {
+    view: (entry: MessageEntry) => {
+      const built = issueToMessage(entry.row.issue, {
         codec,
         labels,
         authorFor: (slug) => store.authorForSlug(slug),
         bdLabels: entry.row.labels,
-      }),
+      });
+      if (!built.ok) return built;
+      // A task root reads as its thread: the record rides the same metadata
+      // blob the message decodes from, so the projection costs no extra bd
+      // read. A claim's holder shows through the assignee slug's card.
+      const record = taskRecordOf(codec, entry.row.issue.metadata);
+      if (record !== null) {
+        const claimActor =
+          store.authorForSlug(entry.row.assignee)?.by.actor ??
+          entry.row.assignee;
+        const task = projectTaskView(entry.meta, record, claimActor);
+        if (task !== null) built.value.task = task;
+      }
+      return built;
+    },
     state: () => state,
     parseCard,
     mapIdentity: async (identity: RouteIdentity): Promise<string> => {

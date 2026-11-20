@@ -23,6 +23,11 @@
  *     metadata rows the same write commits. The rows still fan out as wake
  *     signals to subscribers (claim scans wait on `dep_add`; watchers match
  *     translated events).
+ *   - every `update` that carries a task write's stamped move (`<ns>.move`,
+ *     see src/tasks/record.ts) → that move's `task.*` events, each with the
+ *     message as the event leaves it and the labels before it for the
+ *     feed's filter. The move rides beside the message event; the
+ *     watchers' own translator, which carries no codec, hears none of it.
  *
  * Enrichment reads the row's own issue snapshot first — bd attaches the
  * issue exactly as the write left it, metadata and labels included — so a
@@ -43,13 +48,18 @@ import type {
   BdResult,
 } from "../bd/transport.ts";
 import { issueToMessage } from "../model/message.ts";
+import {
+  projectTaskView,
+  readMove,
+  taskRecordOf,
+  type TaskMoveEntry,
+} from "../tasks/record.ts";
 import type {
   BdIssue,
   LabelsApi,
   MessageAuthorIdentity,
   MetadataCodec,
 } from "../model/types.ts";
-
 /** Why the journal cannot currently serve a faithful feed. */
 export interface JournalWarning {
   code: "journal_disabled";
@@ -57,11 +67,9 @@ export interface JournalWarning {
   /** The operator fix, naming the flag that turns journaling on. */
   fix: string;
 }
-
 /** The poller's lifecycle state. */
 export type PollerStatus =
   "idle" | "live" | "disabled" | "truncated" | "stopped";
-
 /** The raw wake signal one journal row fans out to subscribers. */
 export interface JournalSignal {
   seq: number;
@@ -69,19 +77,46 @@ export interface JournalSignal {
   issueId: string;
   actor: string;
 }
-
 /** What one journal row classifies as. */
+export interface TranslatedEvent {
+  view: BoardEventView;
+  /**
+   * Task-state events ride the feed only: watchers and syncs hear message
+   * changes, and a task's state moves are the feed's to carry.
+   */
+  feedOnly?: boolean;
+  /**
+   * The message's labels as this row found them, when the event is a task's
+   * state move: the feed matches a label filter on the labels before the
+   * event or after it, so a `board.task=ready` feed still shows the claim
+   * whose message left `ready`.
+   */
+  priorLabels?: MessageView["labels"];
+}
 export type RowOutcome =
-  | { kind: "event"; view: BoardEventView }
+  | {
+      kind: "event";
+      /** The row's message event, or — on a task-only row — its first task event. */
+      view: BoardEventView;
+      /**
+       * True when `view` IS the first of `taskEvents` (a task-only row): the
+       * feed serves it from `taskEvents` alone, or it would answer twice.
+       */
+      viewIsTaskEvent?: boolean;
+      /**
+       * The task-state events the row's diff carries (created, ready,
+       * claimed, blocked, unblocked, needs_changed, expired, …), beside the
+       * message event. The feed serves them; nothing else consumes them.
+       */
+      taskEvents?: TranslatedEvent[];
+    }
   | { kind: "noop" }
   | { kind: "skip" }
   | { kind: "hold" };
-
 /** How the translator resolves a bd actor slug to the writer's identity. */
 export type AuthorLookup = (
   slug: string | null,
 ) => MessageAuthorIdentity | null;
-
 export interface TranslatorDeps {
   /**
    * The issue a row names, as the row's own snapshot when it carries one
@@ -99,14 +134,18 @@ export interface TranslatorDeps {
    * instead of the issue's present. Without it, every row reads as-now.
    */
   labels?: LabelsApi;
+  /**
+   * The metadata codec, for reading a task write's own stamped move (the
+   * events the feed carries for it). Without it, a row carries no task
+   * events.
+   */
+  codec?: MetadataCodec;
   /** How long a bare create may wait for its metadata to land (ms). */
   holdMs?: number;
 }
-
 export interface EventTranslator {
   translate(row: BdJournalRecord): Promise<RowOutcome>;
 }
-
 /** The transport surface enrichment reads through: the bd module's own. */
 export interface BdReadTransport {
   run(
@@ -117,21 +156,18 @@ export interface BdReadTransport {
     },
   ): Promise<BdResult>;
 }
-
 export interface EnrichmentDeps {
   transport: BdReadTransport;
   codec: MetadataCodec;
   labels: LabelsApi;
   authorFor?: AuthorLookup;
 }
-
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return null;
   }
   return value as Record<string, unknown>;
 }
-
 /** Decode one `bd show` row (object or one-element array) for the model. */
 function decodeShowRow(data: unknown): BdIssue | null {
   const rows = Array.isArray(data) ? data : [data];
@@ -152,13 +188,11 @@ function decodeShowRow(data: unknown): BdIssue | null {
     metadata: row.metadata,
   };
 }
-
 /** Decode `bd label list <id> --json`: an array of bd label strings. */
 function decodeLabelList(data: unknown): string[] {
   if (!Array.isArray(data)) return [];
   return data.filter((entry): entry is string => typeof entry === "string");
 }
-
 /**
  * The row's own issue snapshot, as a decodable issue with its at-row labels,
  * or null when the snapshot is missing either piece (a bare create's is —
@@ -199,7 +233,6 @@ function snapshotOf(
   if (issue === null) return null;
   return { issue, labels };
 }
-
 /**
  * The enrichment read behind classification: a row's own snapshot when it
  * serves (the write's exact truth, at no spawn cost), else the issue as it
@@ -211,6 +244,17 @@ export function createMessageLoader(
 ): (issueId: string, row?: BdJournalRecord) => Promise<MessageView | null> {
   const authorFor =
     deps.authorFor ?? ((): MessageAuthorIdentity | null => null);
+  /** A task root reads as its thread: the record rides the same blob. */
+  const attachTask = (view: MessageView, metadata: unknown): void => {
+    const decoded = deps.codec.decode(metadata);
+    if (!decoded.ok || decoded.value.role !== "message") return;
+    const task = projectTaskView(
+      decoded.value,
+      taskRecordOf(deps.codec, metadata),
+      null,
+    );
+    if (task !== null) view.task = task;
+  };
   return async (issueId, row) => {
     if (row !== undefined) {
       const snapshot = snapshotOf(row);
@@ -221,7 +265,10 @@ export function createMessageLoader(
           authorFor,
           bdLabels: snapshot.labels,
         });
-        if (view.ok) return view.value;
+        if (view.ok) {
+          attachTask(view.value, snapshot.issue.metadata);
+          return view.value;
+        }
         if (
           snapshot.issue.metadata !== undefined &&
           snapshot.issue.metadata !== null
@@ -260,10 +307,11 @@ export function createMessageLoader(
       authorFor,
       bdLabels,
     });
-    return view.ok ? view.value : null;
+    if (!view.ok) return null;
+    attachTask(view.value, issue.metadata);
+    return view.value;
   };
 }
-
 /** The event's writer fields: the payload `by`, and the `actor` card. */
 function writerOf(
   row: BdJournalRecord,
@@ -284,7 +332,6 @@ function writerOf(
     actor: { ...identity.view, id: identity.by.actor },
   };
 }
-
 /** The `message.posted` event a create row carries once its message reads. */
 export function postedEvent(
   row: BdJournalRecord,
@@ -312,7 +359,6 @@ export function postedEvent(
     actor,
   };
 }
-
 function editedEvent(
   row: BdJournalRecord,
   view: MessageView,
@@ -334,7 +380,6 @@ function editedEvent(
     actor,
   };
 }
-
 function deletedEvent(
   row: BdJournalRecord,
   id: string,
@@ -353,7 +398,6 @@ function deletedEvent(
     actor,
   };
 }
-
 function reactionEvent(
   row: BdJournalRecord,
   view: MessageView,
@@ -371,7 +415,6 @@ function reactionEvent(
     actor,
   };
 }
-
 function labelsEvent(
   row: BdJournalRecord,
   view: MessageView,
@@ -389,7 +432,6 @@ function labelsEvent(
     actor,
   };
 }
-
 /** The first board-visible delta between two label maps. */
 function labelsDelta(
   prior: MessageView["labels"],
@@ -406,7 +448,6 @@ function labelsDelta(
   if (Object.keys(set).length === 0 && unset.length === 0) return null;
   return { set, unset };
 }
-
 /** The first board-visible reaction delta between two reaction maps. */
 function reactionDelta(
   prior: MessageView["reactions"],
@@ -426,7 +467,6 @@ function reactionDelta(
   }
   return null;
 }
-
 /**
  * The labels a row's own issue snapshot carries, as bd label strings, or
  * null when the row names none — a write that moved no label (a bare
@@ -447,7 +487,132 @@ function labelsAtRow(row: BdJournalRecord): string[] | null {
   if (!Array.isArray(labels)) return null;
   return labels.filter((entry): entry is string => typeof entry === "string");
 }
-
+/**
+ * The metadata a row's own snapshot carries, parsed from the journal record,
+ * or null when the row attaches none (a write that moved no metadata).
+ */
+function metadataAtRow(row: BdJournalRecord): unknown {
+  const issue: unknown = row.issue;
+  let snapshot: unknown = issue;
+  if (typeof issue === "string" && issue !== "") {
+    try {
+      snapshot = JSON.parse(issue) as unknown;
+    } catch {
+      return null;
+    }
+  }
+  const record = asRecord(snapshot);
+  if (record === null) return null;
+  let metadata: unknown = record.metadata;
+  if (typeof metadata === "string" && metadata !== "") {
+    try {
+      metadata = JSON.parse(metadata) as unknown;
+    } catch {
+      return undefined;
+    }
+  }
+  return metadata;
+}
+/** The event payload a move entry carries, as the protocol's views serve it. */
+function movePayload(
+  entry: TaskMoveEntry,
+  view: MessageView,
+  by: MessageView["by"],
+): Record<string, unknown> {
+  const task = view.task;
+  const id = view.id;
+  const thread = view.thread;
+  const epoch = task?.epoch ?? 0;
+  switch (entry.type) {
+    case "task.created":
+      return {
+        id,
+        thread,
+        needs: [...(task?.needs ?? [])],
+        for: task?.for ?? null,
+        by,
+      };
+    case "task.ready":
+      return { id, thread };
+    case "task.claimed":
+      return { id, thread, epoch, until: task?.claim?.until ?? "", by };
+    case "task.renewed":
+      return { id, thread, epoch, until: task?.claim?.until ?? "", by };
+    case "task.released":
+      return { id, thread, epoch, by };
+    case "task.expired":
+      return { id, thread, epoch };
+    case "task.completed":
+      return { id, thread, epoch, result: task?.result ?? null, by };
+    case "task.failed":
+      return { id, thread, epoch, reason: task?.reason ?? "", by };
+    case "task.blocked":
+      return {
+        id,
+        thread,
+        kind: task?.blocked?.kind ?? null,
+        reason: task?.blocked?.reason ?? "",
+        by,
+      };
+    case "task.unblocked":
+      return { id, thread, by };
+    case "task.canceled":
+      return { id, thread, reason: task?.reason ?? "", by };
+    case "task.reopened":
+      return { id, thread, by };
+    case "task.assigned":
+      return { id, thread, for: task?.for ?? null, by };
+    case "task.needs_changed":
+      return { id, thread, needs: [...(task?.needs ?? [])], by };
+    default:
+      return { id, thread };
+  }
+}
+/**
+ * The task events one row carries, from the write's own stamped move: each
+ * event with the message as that event leaves it, and the labels before it
+ * carrying the state the task wrote from — so a `board.task=ready` feed
+ * shows a claim whose message left `ready`, however late this reader
+ * arrived. A move the consumer has already served says nothing again.
+ */
+function taskEvents(
+  codec: MetadataCodec,
+  row: BdJournalRecord,
+  view: MessageView,
+  authorFor: AuthorLookup,
+  served: Map<string, string>,
+  prior: MessageView | null,
+): TranslatedEvent[] {
+  const move = readMove(codec, metadataAtRow(row));
+  if (move === null) return [];
+  if (served.get(row.issueId) === move.n) return [];
+  served.set(row.issueId, move.n);
+  const { actor } = writerOf(row, authorFor);
+  const by = authorFor(row.actor)?.by ?? {
+    actor: row.actor,
+    principal: "",
+    profile: null,
+  };
+  return move.events.map((entry) => {
+    const priorLabels: MessageView["labels"] = { ...(prior?.labels ?? {}) };
+    if (entry.from !== undefined) priorLabels["board.task"] = entry.from;
+    return {
+      view: {
+        cursor: String(row.seq),
+        type: entry.type,
+        createdAt: row.ts,
+        payload: movePayload(entry, view, by),
+        message:
+          view.task === undefined
+            ? view
+            : { ...view, task: { ...view.task, state: entry.state } },
+        actor,
+      } as BoardEventView,
+      feedOnly: true,
+      priorLabels,
+    };
+  });
+}
 /**
  * The row classifier. State lives across rows (per issue: the last
  * classified message state, and a create row's first hold), so one
@@ -469,7 +634,6 @@ function bareCreateRow(row: BdJournalRecord): boolean {
     snapshot.issue.metadata === undefined || snapshot.issue.metadata === null
   );
 }
-
 export function createEventTranslator(deps: TranslatorDeps): EventTranslator {
   // The hold has to outlast the metadata write's bd latency on a loaded
   // box: a row whose hold expired before its metadata lands is skipped for
@@ -483,7 +647,8 @@ export function createEventTranslator(deps: TranslatorDeps): EventTranslator {
   const seen = new Map<string, MessageView>();
   /** issueId → epoch ms of the first unclassifiable read of a bare create. */
   const holds = new Map<string, number>();
-
+  /** issueId → the nonce of the last task move this consumer served. */
+  const served = new Map<string, string>();
   async function translate(row: BdJournalRecord): Promise<RowOutcome> {
     // dep_add / dep_remove / comment: no-op rows for the feed (their
     // board-visible state arrives in the metadata rows of the same write),
@@ -503,10 +668,11 @@ export function createEventTranslator(deps: TranslatorDeps): EventTranslator {
     // this consumer already holds — on a loaded box that is two bd
     // invocations per row per walk, and from-zero walks replay rows.
     if (row.op === "create" && prior !== null && bareCreateRow(row)) {
+      // Replayed, so already synthesized: the cached state answers, and no
+      // task events again on top of it.
       return { kind: "event", view: postedEvent(row, prior, authorFor) };
     }
     const view = await deps.loadMessage(row.issueId, row);
-
     if (view === null) {
       if (row.op === "delete" && prior !== null) {
         // The issue is gone outright; the cache is the only memory it was
@@ -536,7 +702,6 @@ export function createEventTranslator(deps: TranslatorDeps): EventTranslator {
       holds.delete(row.issueId);
       return { kind: "skip" };
     }
-
     holds.delete(row.issueId);
     // What this row says the labels were: the snapshot's own, decoded, when
     // it names them; the row before it's, when the write moved no label; the
@@ -552,12 +717,34 @@ export function createEventTranslator(deps: TranslatorDeps): EventTranslator {
           ? view
           : { ...view, labels: deps.labels.fromBdLabels(atRow) };
     seen.set(row.issueId, labeled);
-
     if (row.op === "create") {
+      // A thread that is a task posts; its task events ride the metadata
+      // write's own move, which lands in the rows right after its create.
       return { kind: "event", view: postedEvent(row, view, authorFor) };
     }
     if (row.op === "update") {
-      return classifyUpdate(row, prior ?? null, labeled);
+      const base = classifyUpdate(row, prior ?? null, labeled);
+      // A task's state can move with no message-visible delta (a renewal is
+      // metadata alone), so the move rides even a no-op base row. A
+      // translator without the codec (a watcher's) carries no task events.
+      const moves =
+        deps.codec === undefined
+          ? []
+          : taskEvents(deps.codec, row, view, authorFor, served, prior ?? null);
+      if (base.kind === "event") {
+        return {
+          kind: "event",
+          view: base.view,
+          ...(moves.length > 0 ? { taskEvents: moves } : {}),
+        };
+      }
+      if (moves.length === 0) return { kind: "noop" };
+      return {
+        kind: "event",
+        view: moves[0]!.view,
+        taskEvents: moves,
+        viewIsTaskEvent: true,
+      };
     }
     if (row.op === "close") {
       return view.deleted
@@ -591,7 +778,6 @@ export function createEventTranslator(deps: TranslatorDeps): EventTranslator {
     // their board-visible state arrives in the metadata rows of the write.
     return { kind: "noop" };
   }
-
   function classifyUpdate(
     row: BdJournalRecord,
     prior: MessageView | null,
@@ -657,17 +843,14 @@ export function createEventTranslator(deps: TranslatorDeps): EventTranslator {
     }
     return { kind: "noop" };
   }
-
   return { translate };
 }
-
 export interface EventPollerDeps extends TranslatorDeps {
   /** The typed journal read (the transport's tailEvents). */
   tail: (cursor: string) => Promise<BdEventsPage>;
   /** How often a running poller re-tails (ms). */
   cadenceMs?: number;
 }
-
 export interface EventPoller {
   readonly status: PollerStatus;
   /** Warnings observed so far, newest last; the disabled fix names the flag. */
@@ -699,8 +882,15 @@ export interface EventPoller {
     waitMs: number,
     signal?: AbortSignal,
   ): Promise<boolean>;
+  /**
+   * Records that the journal has ANSWERED a read (a records page, empty
+   * included). The feed's reads tail the journal independently of this
+   * loop, so a successful read is proof the workspace records, and a
+   * loop still saying `disabled` is behind the facts. Only a tail that
+   * names itself disabled, with no answering read ever seen, means that.
+   */
+  noteAnswered(): void;
 }
-
 interface Waiter {
   cursor: number;
   settle: (ok: boolean) => void;
@@ -708,7 +898,6 @@ interface Waiter {
   signal: AbortSignal | undefined;
   onAbort: () => void;
 }
-
 export function createEventPoller(deps: EventPollerDeps): EventPoller {
   const cadenceMs = deps.cadenceMs ?? 250;
   /**
@@ -730,6 +919,14 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
    * consumer waits on.
    */
   let checkpoint: number | null = null;
+  /**
+   * Whether the journal has ever ANSWERED a tail here (a records page —
+   * empty counts: an enabled-but-empty journal answers records with a "0"
+   * cursor). Only a tail that names itself disabled may say this workspace
+   * never recorded; once the journal has answered, its empty reads are a
+   * caught-up consumer, and the status stays live.
+   */
+  let journalEnabledSeen = false;
   let timer: NodeJS.Timeout | undefined;
   let stopped = false;
   /** The tail cycle in flight, if any; set at its start, cleared at its end. */
@@ -743,7 +940,6 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
   const waiters = new Set<Waiter>();
   /** Whether the next cycle runs on the tight cadence or the idle one. */
   let tightScheduled = true;
-
   /**
    * The idle cadence: what a quiet journal costs between reads when nobody
    * waits on the head and nobody classifies rows. Every waiting long-poll
@@ -751,7 +947,6 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
    * once, so wake latency never absorbs the stretch.
    */
   const idleCadenceMs = Math.max(cadenceMs, IDLE_CADENCE_FLOOR_MS);
-
   /** Schedule the loop's next cycle at the tight or the idle cadence. */
   function scheduleNext(tight: boolean): void {
     if (timer !== undefined) clearTimeout(timer);
@@ -765,24 +960,20 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
     );
     timer.unref?.();
   }
-
   /** Whether anyone consumes what a cycle produces beyond the raw head. */
   function someoneListening(): boolean {
     return waiters.size > 0 || eventSubs.size > 0 || truncatedSubs.size > 0;
   }
-
   function rawHeadNumber(): number {
     const value = Number(rawHead);
     return Number.isSafeInteger(value) ? value : 0;
   }
-
   function release(waiter: Waiter, ok: boolean): void {
     if (!waiters.delete(waiter)) return;
     clearTimeout(waiter.timer);
     waiter.signal?.removeEventListener("abort", waiter.onAbort);
     waiter.settle(ok);
   }
-
   /** Resolve every waiter past the raw head; called when the head moves. */
   function wakeWaiters(): void {
     const head = rawHeadNumber();
@@ -790,7 +981,6 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
       if (head > waiter.cursor) release(waiter, true);
     }
   }
-
   /**
    * One tail cycle. At most one runs at a time: a call while one is in
    * flight rides the in-flight promise instead of stacking a new cycle, so
@@ -812,6 +1002,10 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
           if (stopped) return;
           if (probe.kind === "records") {
             status = "live";
+            // An empty records page still says the journal is enabled: it
+            // answered the tail, it just has no rows yet. Only a tail that
+            // names itself disabled may.
+            journalEnabledSeen = true;
             rawHead = probe.cursor;
             const head = Number(probe.cursor);
             checkpoint = Number.isSafeInteger(head) && head > 0 ? head : 0;
@@ -831,16 +1025,21 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
           }
           // A journal that has never recorded: the disabled warning names
           // the flag, and later cycles still re-check in case journaling
-          // turns on under this process.
-          status = "disabled";
-          checkpoint = 0;
-          if (!warnings.some((entry) => entry.code === "journal_disabled")) {
-            warnings.push({
-              code: "journal_disabled",
-              message:
-                "the events journal has never recorded on this workspace: writes made without the journal flag (and out-of-band writers) are invisible to the feed",
-              fix: "set BD_EVENTS_JOURNAL=1 on the backend's bd invocations, or enable the workspace with `bd config set events-journal true`",
-            });
+          // turns on under this process. A read that has already ANSWERED
+          // (a route's, noteAnswered) is the fact the probe cannot
+          // override: its disabled answer left before the first write, and
+          // the next cycle's records page says live again.
+          if (!journalEnabledSeen) {
+            status = "disabled";
+            checkpoint = 0;
+            if (!warnings.some((entry) => entry.code === "journal_disabled")) {
+              warnings.push({
+                code: "journal_disabled",
+                message:
+                  "the events journal has never recorded on this workspace: writes made without the journal flag (and out-of-band writers) are invisible to the feed",
+                fix: "set BD_EVENTS_JOURNAL=1 on the backend's bd invocations, or enable the workspace with `bd config set events-journal true`",
+              });
+            }
           }
           return;
         }
@@ -848,6 +1047,10 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
         if (stopped) return;
         if (page.kind === "records") {
           status = "live";
+          // A caught-up read is the journal answering, not the journal
+          // being absent: only a tail that names itself disabled may say
+          // this workspace never recorded.
+          journalEnabledSeen = true;
           rawHead = page.cursor;
           moved = page.events.length > 0;
           // Row classification serves this poller's own subscribers; the
@@ -891,13 +1094,14 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
           wakeWaiters();
           return;
         }
-        if (checkpoint === 0) {
-          // Nothing was ever classified: an empty read here really is a
-          // journal that has never recorded. Past a nonzero checkpoint the
-          // same read is just a caught-up consumer — this backend journals
-          // writes through the per-process flag, so the workspace config
-          // being off does not make the feed disabled.
+        // A journal that has never recorded gets one more look — journaling
+        // can turn on under this process. A journal that has ANSWERED
+        // before (journalEnabledSeen) is enabled: its empty reads are a
+        // caught-up consumer, never a disabled state, whatever the
+        // checkpoint says.
+        if (!journalEnabledSeen) {
           status = "disabled";
+          checkpoint = 0;
           if (!warnings.some((entry) => entry.code === "journal_disabled")) {
             warnings.push({
               code: "journal_disabled",
@@ -907,6 +1111,7 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
             });
           }
         }
+        return;
       } catch {
         // A failed read keeps the checkpoint and retries next cadence; the
         // consumer never crashes on one bad invocation.
@@ -921,18 +1126,15 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
     })();
     return pending;
   }
-
   async function tick(): Promise<void> {
     while (pending !== null) await pending;
     if (!stopped) await runCycle();
   }
-
   function start(): void {
     if (stopped || timer !== undefined) return;
     void runCycle();
     scheduleNext(true);
   }
-
   async function stop(): Promise<void> {
     stopped = true;
     if (timer !== undefined) {
@@ -942,11 +1144,15 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
     for (const waiter of [...waiters]) release(waiter, false);
     status = "stopped";
   }
-
   function head(): string {
     return rawHead;
   }
-
+  function noteAnswered(): void {
+    journalEnabledSeen = true;
+    if (!stopped) {
+      status = "live";
+    }
+  }
   function waitBeyond(
     cursor: string,
     waitMs: number,
@@ -975,19 +1181,16 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
       else waiters.add(waiter);
     });
   }
-
   function onRecord(fn: (signal: JournalSignal) => void): () => void {
     recordSubs.add(fn);
     if (!tightScheduled) scheduleNext(true);
     return () => recordSubs.delete(fn);
   }
-
   function onEvent(fn: (view: BoardEventView) => void): () => void {
     eventSubs.add(fn);
     if (!tightScheduled) scheduleNext(true);
     return () => eventSubs.delete(fn);
   }
-
   function onTruncated(
     fn: (info: { floor: number; head: number | null }) => void,
   ): () => void {
@@ -995,7 +1198,6 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
     if (!tightScheduled) scheduleNext(true);
     return () => truncatedSubs.delete(fn);
   }
-
   return {
     get status() {
       return status;
@@ -1004,6 +1206,7 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
       return warnings;
     },
     head,
+    noteAnswered,
     start,
     tick,
     stop,

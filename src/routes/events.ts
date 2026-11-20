@@ -11,9 +11,9 @@
  *   - The page's `cursor` is the last journal seq examined, matched or not,
  *     so reading on from it never repeats and never rescans. Each event's
  *     own `cursor` is the seq it sits at.
- *   - Omitted `after` reads from the journal head the consumer has seen
- *     (production binds the poller at startup; without it, from the
- *     journal's start).
+ *   - Omitted `after` follows from the journal's true head at the read: the
+ *     page answers the events that land from the call onward, never the
+ *     history a lagging checkpoint would replay.
  *   - Hostile cursors are 400 `invalid_cursor`; a journal whose retention
  *     has cut below the requested cursor answers 400 `invalid_cursor` with
  *     a re-baseline hint — mid-poll included, never a hang; a journal that
@@ -160,7 +160,11 @@ function payloadBy(event: BoardEventView): MessageView["by"] | null {
   return null;
 }
 
-function matchesFilters(event: BoardEventView, input: EventsInput): boolean {
+function matchesFilters(
+  event: BoardEventView,
+  input: EventsInput,
+  priorLabels?: MessageView["labels"],
+): boolean {
   const message = event.message;
   if (input.channel !== undefined) {
     if (message === undefined) return false;
@@ -194,15 +198,24 @@ function matchesFilters(event: BoardEventView, input: EventsInput): boolean {
     }
   }
   if (input.label !== undefined) {
-    if (message === undefined) return false;
-    for (const [key, values] of input.label) {
-      const carried = message.labels[key];
-      if (values === null) {
-        if (carried === undefined) return false;
-      } else if (!values.some((value) => carried === value)) {
-        return false;
+    // Matched before the event or after it: a `board.task=ready` feed shows
+    // the claim whose message left `ready`, and the readying whose message
+    // arrived at it. A task state's event carries both, its prior labels
+    // beside its message's own.
+    const wanted = input.label;
+    const matched = (labels: MessageView["labels"] | undefined): boolean => {
+      if (labels === undefined) return false;
+      for (const [key, values] of wanted) {
+        const carried = labels[key];
+        if (values === null) {
+          if (carried === undefined) return false;
+        } else if (!values.some((value) => carried === value)) {
+          return false;
+        }
       }
-    }
+      return true;
+    };
+    if (!matched(message?.labels) && !matched(priorLabels)) return false;
   }
   return true;
 }
@@ -305,6 +318,7 @@ export function createEventRoutes(deps: EventRouteDeps): EventRoutes {
     loadMessage: loader,
     authorFor: deps.authorFor,
     labels: deps.labels,
+    codec: deps.codec,
     holdMs: deps.holdMs,
   });
   const resolveAnchor = createAnchorResolver(deps.transport, loader);
@@ -324,6 +338,11 @@ export function createEventRoutes(deps: EventRouteDeps): EventRoutes {
     const base = decodeEventCursor(cursor);
     if (!base.ok) throw invalidAfter(cursor);
     const page = await deps.transport.tailEvents(cursor);
+    // This read just proved the journal answers (a records page — an empty
+    // one included). The loop tails independently and may still be saying
+    // `disabled` off its own empty probe, so the fact travels: the status
+    // is decided by what the journal has answered, not by who asked first.
+    if (page.kind === "records") poller.noteAnswered();
     if (page.kind === "truncated") {
       return { kind: "truncated", floor: page.floor, head: page.head };
     }
@@ -341,8 +360,23 @@ export function createEventRoutes(deps: EventRouteDeps): EventRoutes {
         break;
       }
       advanced = row.seq;
-      if (outcome.kind === "event" && matchesFilters(outcome.view, input)) {
+      if (outcome.kind !== "event") continue;
+      // A task-only row's view IS its first task event: the feed serves it
+      // from `taskEvents`, or the event would land on the page twice.
+      if (
+        outcome.viewIsTaskEvent !== true &&
+        matchesFilters(
+          outcome.view,
+          input,
+          outcome.taskEvents?.[0]?.priorLabels,
+        )
+      ) {
         matched.push(outcome.view);
+      }
+      for (const one of outcome.taskEvents ?? []) {
+        if (matchesFilters(one.view, input, one.priorLabels)) {
+          matched.push(one.view);
+        }
       }
     }
     return { kind: "page", events: matched, cursor: String(advanced), held };
@@ -379,10 +413,24 @@ export function createEventRoutes(deps: EventRouteDeps): EventRoutes {
       }
       if (cursor === null) {
         try {
-          cursor =
-            input.after === undefined
-              ? poller.head()
-              : await resolveAnchor(input.after);
+          if (input.after === undefined) {
+            // An after-less read follows from the journal's own head right
+            // now — not from wherever this consumer's checkpoint happens to
+            // sit. Its answer is the events that land from this call
+            // onward: a task created before the read is history, and a
+            // checkpoint that lags (the loop idles when nobody waits) must
+            // not turn that history into the page. One tail places the
+            // anchor at the true head; the delivering read tails from it.
+            const headPage = await deps.transport.tailEvents(poller.head());
+            if (headPage.kind === "records") {
+              poller.noteAnswered();
+              cursor = headPage.cursor;
+            } else {
+              cursor = poller.head();
+            }
+          } else {
+            cursor = await resolveAnchor(input.after);
+          }
         } catch (error) {
           if (error instanceof HttpError) throw error;
           if (Date.now() >= deadline) throw error;

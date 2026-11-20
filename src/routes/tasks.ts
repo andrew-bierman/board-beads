@@ -35,6 +35,11 @@
  *     labels ride per-task single-op writes behind it (bd's batch grammar
  *     has no description or labels slots, and no way to name a create's id
  *     for a later dep line);
+ *   - every task write stamps the move it made (`<ns>.move`, the feed's
+ *     `task.*` events, each with the state it leaves the task in) beside the
+ *     record, so the feed says what a write did however late its reader
+ *     arrives — the write is the word, not a diff guessed from state the
+ *     reader never saw;
  *   - `claimReadyTask` long-polls: one scan per wake, woken by the journal
  *     poller on any task-relevant write plus a slow 30s safety re-poll for
  *     out-of-band writers — never a fixed 1s bd list cadence. Races (bd
@@ -79,19 +84,28 @@ import {
   ttlFromIssuePayload,
 } from "../tasks/leases.ts";
 import type { LeaseTimers } from "../tasks/leases.ts";
+import {
+  decodeTaskRecord,
+  encodeTaskRecord,
+  LEASE_CAP_S,
+  leaseOutsideBand,
+  LEASE_MIN_S,
+  movePatch,
+  newMoveNonce,
+  projectTaskView,
+  TASK_LABEL,
+  type TaskMoveEntry,
+  type TaskRecord,
+  type TaskState,
+} from "../tasks/record.ts";
 import { createHash, randomBytes } from "node:crypto";
 
 /** The protocol's long-poll ceiling, in seconds, and the safety re-poll. */
 const WAIT_CAP_SECONDS = 300;
 const SAFETY_REPOLL_MS = 30_000;
 
-/** Leases: what a claim gets without asking, and the accepted bounds. */
+/** Leases: what a claim gets without asking. The accepted band lives with the record. */
 const LEASE_DEFAULT_S = 900;
-const LEASE_MIN_S = 30;
-const LEASE_CAP_S = 3600;
-
-/** Board's reserved task-state label. */
-const TASK_LABEL = "board.task";
 
 /** A task's own bounds, matching the protocol's reference board. */
 const TASK_NEEDS_MAX = 20;
@@ -108,26 +122,6 @@ const ACTOR_ID_PATTERN = /^[^\s:]+:\S+$/;
 /** The profile part of an owner's actor id: one of its own word for an agent. */
 const PROFILE_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
 
-/** A task's state, exactly as the protocol's `board.task` label carries it. */
-type TaskState =
-  | "waiting"
-  | "ready"
-  | "claimed"
-  | "blocked"
-  | "completed"
-  | "failed"
-  | "canceled";
-
-const TASK_STATES: readonly TaskState[] = [
-  "waiting",
-  "ready",
-  "claimed",
-  "blocked",
-  "completed",
-  "failed",
-  "canceled",
-];
-
 /** The open states a plain list answers; a lapsed claim reads as ready. */
 const OPEN_STATES: readonly TaskState[] = [
   "waiting",
@@ -135,24 +129,6 @@ const OPEN_STATES: readonly TaskState[] = [
   "claimed",
   "blocked",
 ];
-
-/** The task record, in its logical shape, as `<ns>.task` in the metadata blob. */
-interface TaskRecord {
-  state: TaskState;
-  /** The principal that made the thread a task. */
-  owner: string;
-  /** The actor it did that as. */
-  by: string;
-  /** The one actor that claims it, or null. */
-  for: string | null;
-  /** The tasks it waits for, by their root ids. */
-  needs: string[];
-  blocked: { kind: string | null; reason: string } | null;
-  result: string | null;
-  reason: string | null;
-  /** The backend sequence the root was created at, for stable ordering. */
-  seq: number;
-}
 
 /** One bd list row, decoded tolerantly, with what tasks read. */
 interface TaskRow {
@@ -348,101 +324,6 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value as Record<string, unknown>;
 }
 
-function isState(value: unknown): value is TaskState {
-  return (
-    typeof value === "string" &&
-    (TASK_STATES as readonly string[]).includes(value)
-  );
-}
-
-function isBlocked(value: unknown): value is TaskRecord["blocked"] {
-  if (value === null) return true;
-  const record = asRecord(value);
-  if (record === null) return false;
-  if (record.reason !== undefined && typeof record.reason !== "string")
-    return false;
-  if (
-    record.kind !== undefined &&
-    record.kind !== null &&
-    typeof record.kind !== "string"
-  ) {
-    return false;
-  }
-  return true;
-}
-
-/** Decode the `<ns>.task` record, tolerantly: every failure is a reason. */
-function decodeTaskRecord(
-  raw: unknown,
-): { ok: true; value: TaskRecord } | { ok: false } {
-  const record = asRecord(raw);
-  if (record === null) return { ok: false };
-  const state = record.state;
-  if (!isState(state)) return { ok: false };
-  if (typeof record.owner !== "string" || typeof record.by !== "string")
-    return { ok: false };
-  if (
-    record.for !== undefined &&
-    record.for !== null &&
-    typeof record.for !== "string"
-  ) {
-    return { ok: false };
-  }
-  if (
-    !Array.isArray(record.needs) ||
-    record.needs.some((need) => typeof need !== "string")
-  ) {
-    return { ok: false };
-  }
-  if (!isBlocked(record.blocked)) return { ok: false };
-  if (
-    record.result !== undefined &&
-    record.result !== null &&
-    typeof record.result !== "string"
-  ) {
-    return { ok: false };
-  }
-  if (
-    record.reason !== undefined &&
-    record.reason !== null &&
-    typeof record.reason !== "string"
-  ) {
-    return { ok: false };
-  }
-  return {
-    ok: true,
-    value: {
-      state,
-      owner: record.owner,
-      by: record.by,
-      for: (record.for ?? null) as string | null,
-      needs: (record.needs as string[]).slice(),
-      blocked: (record.blocked ?? null) as TaskRecord["blocked"],
-      result: (record.result ?? null) as string | null,
-      reason: (record.reason ?? null) as string | null,
-      seq:
-        typeof record.seq === "number" && Number.isSafeInteger(record.seq)
-          ? record.seq
-          : 0,
-    },
-  };
-}
-
-function encodeTaskRecord(record: TaskRecord): JsonValue {
-  return {
-    v: 1,
-    state: record.state,
-    owner: record.owner,
-    by: record.by,
-    for: record.for,
-    needs: [...record.needs],
-    blocked: record.blocked,
-    result: record.result,
-    reason: record.reason,
-    seq: record.seq,
-  };
-}
-
 /** Decode one bd list row into what tasks read, or null. */
 function decodeTaskRow(codec: MetadataCodec, raw: unknown): TaskRow | null {
   const row = asRecord(raw);
@@ -490,6 +371,7 @@ interface IssueRow {
   issue: BdIssue;
   labels: string[];
   seq: number;
+  assignee: string | null;
 }
 
 /** A task row as the threads routes' IssueRow, so views build from either. */
@@ -504,7 +386,7 @@ function toIssueRow(row: TaskRow): IssueRow {
     created_by: row.createdBy,
     metadata: row.metadata,
   };
-  return { issue, labels: row.labels, seq: row.seq };
+  return { issue, labels: row.labels, seq: row.seq, assignee: row.assignee };
 }
 
 // ---------------------------------------------------------------------------
@@ -719,22 +601,15 @@ export function createTaskRoutes(
         `the task at ${entry.row.id} stopped reading back as a message`,
       );
     }
-    const claim = entry.meta.claim;
-    view.value.task = {
-      state: entry.task.state,
-      owner: entry.task.owner,
-      by: entry.task.by,
-      for: entry.task.for,
-      needs: [...entry.task.needs],
-      epoch: entry.meta.epoch,
-      claim:
-        claim === null
-          ? null
-          : { actor: actorForSlug(entry.row.assignee), until: claim.until },
-      blocked: entry.task.blocked === null ? null : { ...entry.task.blocked },
-      result: entry.task.result,
-      reason: entry.task.reason,
-    };
+    // The claim's holder reads through the assignee slug's own card, which
+    // this row fetched from bd directly — the store view's projection has
+    // no assignee on its row shape.
+    const task = projectTaskView(
+      entry.meta,
+      entry.task,
+      actorForSlug(entry.row.assignee) || null,
+    );
+    if (task !== null) view.value.task = task;
     return view.value;
   }
 
@@ -811,6 +686,58 @@ export function createTaskRoutes(
     return bounded * 1000;
   }
 
+  /**
+   * A lease ask inside the board's band, or 400 before anything is read:
+   * the floor and the cap are the protocol's, checked where the reference
+   * board checks them — on the request's shape, ahead of the write.
+   */
+  function ensureLease(seconds: number | undefined): void {
+    const problem = leaseOutsideBand(seconds);
+    if (problem !== null) throw badRequest(problem);
+  }
+
+  /**
+   * Clear a settled task's native blockers: the dep edges the batch wrote
+   * (the task depends on each need) go when they say nothing anymore — a
+   * bd close refuses on a blocked issue, and a satisfied edge blocks
+   * nothing the record doesn't.
+   */
+  async function clearDeps(
+    id: string,
+    others: readonly string[],
+    actor: string,
+  ): Promise<void> {
+    for (const other of others) {
+      await store
+        .run(["dep", "remove", id, other, "--json"], actor)
+        .catch(() => undefined);
+    }
+  }
+
+  /**
+   * Stamp a write's move in a trailing bd write of its own. The stamp must
+   * land after the write it names — bd journals a multi-part update as one
+   * record per changed field, each snapshot carrying only the labels written
+   * so far — so the record the feed reads the move from always wears the
+   * write's whole labels, and the events it carries match on them.
+   */
+  async function stampMove(
+    id: string,
+    actor: string,
+    events: TaskMoveEntry[],
+  ): Promise<void> {
+    await store.run(
+      [
+        "update",
+        id,
+        "--metadata",
+        JSON.stringify(movePatch(codec, { n: newMoveNonce(), events })),
+        "--json",
+      ],
+      actor,
+    );
+  }
+
   function hashToken(token: string): string {
     return createHash("sha256").update(token, "utf8").digest("hex");
   }
@@ -873,6 +800,9 @@ export function createTaskRoutes(
       epoch: entry.meta.epoch,
       moves: stateMoves(entry.row, state),
     });
+    await stampMove(id, store.systemActor, [
+      { type: "task.expired", state, from: "claimed" },
+    ]);
     timers.cancel(id, epoch);
     stopKeepAlive(id, epoch);
     const fresh = await taskEntryById(id);
@@ -1036,6 +966,9 @@ export function createTaskRoutes(
           },
           stateMoves(fresh.row, state),
         );
+        await stampMove(id, slug, [
+          { type: "task.claimed", state: "claimed", from: fresh.task.state },
+        ]);
         timers.arm(id, epoch, Date.parse(until));
         const measured = ttl.ok ? ttl.value.ttlMs : measuredTtlMs;
         if (measured !== null && Date.parse(until) > Date.now() + measured) {
@@ -1159,6 +1092,43 @@ export function createTaskRoutes(
   ): Promise<TaskState> {
     if (blocked) return "blocked";
     return (await needsSatisfied(needs)) ? "ready" : "waiting";
+  }
+
+  /**
+   * The caller's own write under a client id, as a task create retries it:
+   * a task root comes back as it stands; anything else that landed with the
+   * id — a reply, a plain thread — is another write's, refused, and nothing
+   * is made under it. Someone else's id is refused the same way, whatever
+   * it landed with.
+   */
+  async function findOwnTaskWrite(
+    identity: RouteIdentity,
+    clientId: string,
+  ): Promise<{ task: MessageView } | { conflict: true } | null> {
+    const found = await store.rows([
+      "list",
+      "--has-metadata-key",
+      `${ns}.client`,
+    ]);
+    for (const row of found) {
+      const entry = await store.entryById(row.issue.id);
+      if (entry === null || entry.meta.client !== clientId) continue;
+      const author =
+        store.authorForSlug(entry.row.issue.created_by ?? null)?.by ?? null;
+      const wrote =
+        author !== null &&
+        author.principal === identity.principalId &&
+        (identity.profile === null || author.actor === identity.actorId);
+      if (!wrote) return { conflict: true };
+      const record = decodeTaskRecord(
+        asRecord(entry.row.issue.metadata)?.[taskKey],
+      );
+      if (!record.ok) return { conflict: true };
+      const view = store.view(entry);
+      if (!view.ok) return { conflict: true };
+      return { task: view.value };
+    }
+    return null;
   }
 
   /** An assignee a task's owner may name: one of its own actor ids. */
@@ -1546,6 +1516,7 @@ export function createTaskRoutes(
     async createTask(caller, input): Promise<Protocol["createTask"]["output"]> {
       await store.ensureReady();
       const identity = identityOf(caller);
+      ensureLease(input.lease);
       guardLabels(input.labels);
       if ((input.text?.length ?? 0) > TASK_TEXT_MAX) {
         throw badRequest(
@@ -1674,6 +1645,22 @@ export function createTaskRoutes(
                 },
                 { add: [`${TASK_LABEL}=${record.state}`] },
               );
+              await stampMove(adoptId, slug, [
+                ...(needs.ids.length > 0
+                  ? [
+                      {
+                        type: "task.created",
+                        state: "waiting",
+                      } as TaskMoveEntry,
+                    ]
+                  : [
+                      { type: "task.created", state: "ready" } as TaskMoveEntry,
+                    ]),
+                ...(needs.ids.length > 0
+                  ? [{ type: "task.ready", state: "ready" } as TaskMoveEntry]
+                  : []),
+                { type: "task.claimed", state: "claimed" },
+              ]);
               timers.arm(adoptId, claim.epoch, Date.parse(claim.until));
               return;
             } catch (error) {
@@ -1696,6 +1683,15 @@ export function createTaskRoutes(
             { [taskKey]: encodeTaskRecord(record) },
             { add: [`${TASK_LABEL}=${record.state}`] },
           );
+          await stampMove(adoptId, slug, [
+            {
+              type: "task.created",
+              state: needs.ids.length > 0 ? "waiting" : "ready",
+            },
+            ...(needs.ids.length > 0 && record.state === "ready"
+              ? [{ type: "task.ready", state: "ready" } as TaskMoveEntry]
+              : []),
+          ]);
         });
         const entry = await taskEntryById(adoptId);
         if (entry === null)
@@ -1754,117 +1750,159 @@ export function createTaskRoutes(
         );
       }
 
-      const seq = await store.nextSeq();
-      const created = await store.run(
-        [
-          "create",
-          `--title=${deriveTitle(text)}`,
-          `--description=${text}`,
-          "--type=task",
-          "--json",
-        ],
-        slug,
-      );
-      const id = createdIdOf(created);
-      if (id === null)
-        throw internalAt("bd create returned no issue id for the task");
-
-      // The create row journals at once; the metadata write lands the task.
-      const meta = initialMessageMeta({
-        channel,
-        thread: id,
-        client: input.id ?? null,
-        noSync: input.noSync ?? false,
-      });
-      const encoded = codec.encodeMessage(meta);
-      if (!encoded.ok) {
-        throw badRequest(
-          `the task's metadata is too large to store (${encoded.error.bytes} > ${encoded.error.limit} bytes)`,
-          "metadata_too_large",
-        );
-      }
-      const record: TaskRecord = {
-        state: needs.ids.length > 0 && !needs.completed ? "waiting" : "ready",
-        owner: identity.principalId,
-        by: identity.actorId,
-        for: assigned,
-        needs: needs.ids,
-        blocked: null,
-        result: null,
-        reason: null,
-        seq,
+      // One write per client id: the asks that race serialize here, and the
+      // retry of a landed create is answered that task, making nothing.
+      const run = async (): Promise<Protocol["createTask"]["output"]> => {
+        if (input.id !== undefined) {
+          const found = await findOwnTaskWrite(identity, input.id);
+          if (found !== null) {
+            if ("conflict" in found) {
+              throw conflict(
+                "duplicate_id",
+                "that id was already used for a different write",
+              );
+            }
+            return { task: found.task };
+          }
+        }
+        return startNewThread();
       };
 
-      let claimPatch: Record<string, JsonValue> = {};
-      let claim: TaskClaim | undefined;
-      if (claims) {
-        const claimed = await store.run(
-          ["update", id, "--claim", "--json"],
+      /** The create itself: a new thread that is a task from its first read. */
+      const startNewThread = async (): Promise<
+        Protocol["createTask"]["output"]
+      > => {
+        const seq = await store.nextSeq();
+        const created = await store.run(
+          [
+            "create",
+            `--title=${deriveTitle(text)}`,
+            `--description=${text}`,
+            "--type=task",
+            "--json",
+          ],
           slug,
         );
-        const ttl = ttlFromIssuePayload(claimed.data);
-        claim = {
-          epoch: 1,
-          token: input.token ?? newToken(),
-          until: new Date(Date.now() + leaseMs(input.lease)).toISOString(),
-        };
-        const measured = ttl.ok ? ttl.value.ttlMs : measuredTtlMs;
-        if (
-          measured !== null &&
-          Date.parse(claim.until) > Date.now() + measured
-        ) {
-          startKeepAlive(
-            id,
-            claim.epoch,
-            slug,
-            measured,
-            Date.parse(claim.until),
+        const id = createdIdOf(created);
+        if (id === null)
+          throw internalAt("bd create returned no issue id for the task");
+
+        // The create row journals at once; the metadata write lands the task.
+        const meta = initialMessageMeta({
+          channel,
+          thread: id,
+          client: input.id ?? null,
+          noSync: input.noSync ?? false,
+        });
+        const encoded = codec.encodeMessage(meta);
+        if (!encoded.ok) {
+          throw badRequest(
+            `the task's metadata is too large to store (${encoded.error.bytes} > ${encoded.error.limit} bytes)`,
+            "metadata_too_large",
           );
         }
-        claimPatch = {
-          [`${ns}.epoch`]: claim.epoch,
-          [`${ns}.claim`]: {
-            epoch: claim.epoch,
-            token: hashToken(claim.token),
-            until: claim.until,
-          },
+        const record: TaskRecord = {
+          state: needs.ids.length > 0 && !needs.completed ? "waiting" : "ready",
+          owner: identity.principalId,
+          by: identity.actorId,
+          for: assigned,
+          needs: needs.ids,
+          blocked: null,
+          result: null,
+          reason: null,
+          seq,
         };
-        record.state = "claimed";
-      }
 
-      const addLabels = [
-        `${ns}.channel=${channel}`,
-        `${ns}.root`,
-        `${TASK_LABEL}=${record.state}`,
-        ...callerLabelArgs(input.labels),
-      ];
-      const blob: Record<string, JsonValue> = {
-        ...encoded.value,
-        [`${ns}.seq`]: seq,
-        [taskKey]: encodeTaskRecord(record),
-        ...claimPatch,
+        let claimPatch: Record<string, JsonValue> = {};
+        let claim: TaskClaim | undefined;
+        if (claims) {
+          const claimed = await store.run(
+            ["update", id, "--claim", "--json"],
+            slug,
+          );
+          const ttl = ttlFromIssuePayload(claimed.data);
+          claim = {
+            epoch: 1,
+            token: input.token ?? newToken(),
+            until: new Date(Date.now() + leaseMs(input.lease)).toISOString(),
+          };
+          const measured = ttl.ok ? ttl.value.ttlMs : measuredTtlMs;
+          if (
+            measured !== null &&
+            Date.parse(claim.until) > Date.now() + measured
+          ) {
+            startKeepAlive(
+              id,
+              claim.epoch,
+              slug,
+              measured,
+              Date.parse(claim.until),
+            );
+          }
+          claimPatch = {
+            [`${ns}.epoch`]: claim.epoch,
+            [`${ns}.claim`]: {
+              epoch: claim.epoch,
+              token: hashToken(claim.token),
+              until: claim.until,
+            },
+          };
+          record.state = "claimed";
+        }
+
+        const addLabels = [
+          `${ns}.channel=${channel}`,
+          `${ns}.root`,
+          `${TASK_LABEL}=${record.state}`,
+          ...callerLabelArgs(input.labels),
+        ];
+        // What making this task says, as its events: it waits while it
+        // names needs, is ready in the same write once they've completed,
+        // and claimed after when the write claimed it.
+        const startEvents: TaskMoveEntry[] = [
+          {
+            type: "task.created",
+            state: needs.ids.length > 0 ? "waiting" : "ready",
+          },
+        ];
+        if (needs.ids.length > 0 && record.state !== "waiting") {
+          startEvents.push({ type: "task.ready", state: "ready" });
+        }
+        if (record.state === "claimed") {
+          startEvents.push({ type: "task.claimed", state: "claimed" });
+        }
+        const blob: Record<string, JsonValue> = {
+          ...encoded.value,
+          [`${ns}.seq`]: seq,
+          [taskKey]: encodeTaskRecord(record),
+          ...claimPatch,
+        };
+        await store.run(
+          [
+            "update",
+            id,
+            "--metadata",
+            JSON.stringify(blob),
+            ...addLabels.flatMap((label) => ["--add-label", label]),
+            "--json",
+          ],
+          slug,
+        );
+        await stampMove(id, slug, startEvents);
+        if (claim !== undefined)
+          timers.arm(id, claim.epoch, Date.parse(claim.until));
+        const entry = await taskEntryById(id);
+        if (entry === null)
+          throw internalAt("the task just created doesn't read back");
+        const made = viewOf(entry);
+        return {
+          task: made,
+          ...(claim !== undefined ? { claim } : {}),
+        };
       };
-      await store.run(
-        [
-          "update",
-          id,
-          "--metadata",
-          JSON.stringify(blob),
-          ...addLabels.flatMap((label) => ["--add-label", label]),
-          "--json",
-        ],
-        slug,
-      );
-      if (claim !== undefined)
-        timers.arm(id, claim.epoch, Date.parse(claim.until));
-      const entry = await taskEntryById(id);
-      if (entry === null)
-        throw internalAt("the task just created doesn't read back");
-      const made = viewOf(entry);
-      return {
-        task: made,
-        ...(claim !== undefined ? { claim } : {}),
-      };
+      return input.id !== undefined
+        ? store.gate.run(`client:${input.id}`, run)
+        : run();
     },
 
     /** Several new threads in one channel, each a task, all or none. */
@@ -2114,10 +2152,20 @@ export function createTaskRoutes(
           ],
           slug,
         );
-        // The needs' edges, native: what the task waits for blocks it.
+        await stampMove(id, slug, [
+          {
+            type: "task.created",
+            state: record.state === "waiting" ? "waiting" : "ready",
+          },
+          ...(record.state === "ready" && record.needs.length > 0
+            ? [{ type: "task.ready", state: "ready" } as TaskMoveEntry]
+            : []),
+        ]);
+        // The needs' edges, native: what the task waits for blocks it — the
+        // task depends on its need, so bd's blocker sits on the task.
         for (const need of record.needs) {
           await store
-            .run(["dep", "add", need, id], slug)
+            .run(["dep", "add", id, need], slug)
             .catch(() => undefined);
         }
         ids.push(id);
@@ -2175,6 +2223,7 @@ export function createTaskRoutes(
     ): Promise<Protocol["claimReadyTask"]["output"]> {
       await store.ensureReady();
       const identity = identityOf(caller);
+      ensureLease(input.lease);
       const slug = await store.mapIdentity(identity);
       ensureTtlProbed();
       const subtree = input.channel.endsWith("/");
@@ -2255,6 +2304,7 @@ export function createTaskRoutes(
     async claimTask(caller, input): Promise<Protocol["claimTask"]["output"]> {
       await store.ensureReady();
       const identity = identityOf(caller);
+      ensureLease(input.lease);
       const slug = await store.mapIdentity(identity);
       ensureTtlProbed();
       const entry = await taskEntryById(input.id);
@@ -2317,6 +2367,7 @@ export function createTaskRoutes(
     async renewTask(caller, input): Promise<Protocol["renewTask"]["output"]> {
       await store.ensureReady();
       const identity = identityOf(caller);
+      ensureLease(input.lease);
       const slug = await store.mapIdentity(identity);
       const until = await store.gate.run(
         `issue:${input.id}`,
@@ -2348,6 +2399,9 @@ export function createTaskRoutes(
             throw error;
           }
           await updateTask(input.id, slug, { [`${ns}.claim`]: claim });
+          await stampMove(input.id, slug, [
+            { type: "task.renewed", state: "claimed", from: "claimed" },
+          ]);
           timers.arm(input.id, input.epoch, Date.parse(until));
           return until;
         },
@@ -2399,6 +2453,9 @@ export function createTaskRoutes(
             },
             stateMoves(entry.row, state),
           );
+          await stampMove(input.id, slug, [
+            { type: "task.released", state, from: "claimed" },
+          ]);
           const fresh = await taskEntryById(input.id);
           if (fresh === null)
             throw internalAt("the released task doesn't read back");
@@ -2433,6 +2490,9 @@ export function createTaskRoutes(
             );
           }
           fenced(entry, input, Date.now());
+          // The task's satisfied edges go first: bd's close refuses on a
+          // blocked issue, and what it waited for has completed.
+          await clearDeps(input.id, entry.task.needs, slug);
           // bd's guarded close: it refuses for anyone but the claim's holder.
           const args = ["close", input.id, "--json"];
           if (input.result !== undefined) args.push("--reason", input.result);
@@ -2458,6 +2518,9 @@ export function createTaskRoutes(
             },
             stateMoves(entry.row, "completed"),
           );
+          await stampMove(input.id, slug, [
+            { type: "task.completed", state: "completed", from: "claimed" },
+          ]);
           const fresh = await taskEntryById(input.id);
           if (fresh === null)
             throw internalAt("the completed task doesn't read back");
@@ -2492,6 +2555,7 @@ export function createTaskRoutes(
             );
           }
           fenced(entry, input, Date.now());
+          await clearDeps(input.id, entry.task.needs, slug);
           try {
             await store.run(
               ["close", input.id, "--reason", input.reason, "--json"],
@@ -2517,6 +2581,9 @@ export function createTaskRoutes(
             },
             stateMoves(entry.row, "failed"),
           );
+          await stampMove(input.id, slug, [
+            { type: "task.failed", state: "failed", from: "claimed" },
+          ]);
           const fresh = await taskEntryById(input.id);
           if (fresh === null)
             throw internalAt("the failed task doesn't read back");
@@ -2619,6 +2686,9 @@ export function createTaskRoutes(
             },
             stateMoves(entry.row, "blocked"),
           );
+          await stampMove(input.id, slug, [
+            { type: "task.blocked", state: "blocked", from: entry.task.state },
+          ]);
           const fresh = await taskEntryById(input.id);
           if (fresh === null)
             throw internalAt("the blocked task doesn't read back");
@@ -2657,6 +2727,19 @@ export function createTaskRoutes(
           }
           if (entry.task.state !== "blocked") return viewOf(entry);
           const state = await settleState(entry.task.needs, false);
+          // Unblocked reads where the fold puts it: ready at once with no
+          // needs, waiting first with some — and the ready that then follows
+          // is its own event.
+          const unblockEvents: TaskMoveEntry[] = [
+            {
+              type: "task.unblocked",
+              state: entry.task.needs.length > 0 ? "waiting" : state,
+              from: "blocked",
+            },
+          ];
+          if (state === "ready" && entry.task.needs.length > 0) {
+            unblockEvents.push({ type: "task.ready", state: "ready" });
+          }
           await updateTask(
             input.id,
             slug,
@@ -2669,6 +2752,7 @@ export function createTaskRoutes(
             },
             stateMoves(entry.row, state),
           );
+          await stampMove(input.id, slug, unblockEvents);
           const fresh = await taskEntryById(input.id);
           if (fresh === null)
             throw internalAt("the unblocked task doesn't read back");
@@ -2702,6 +2786,23 @@ export function createTaskRoutes(
             throw taskFinished(input.id, entry.task.state);
           }
           if (entry.task.state !== "failed") return viewOf(entry);
+          // bd's own record reopens with the record: a failed task's issue is
+          // closed, and a claim of a closed issue is refused outright — the
+          // reopen sets bd's status back first, and clears a holder bd's
+          // close left in place.
+          const holder = entry.row.assignee;
+          if (holder !== null) {
+            await store
+              .run(
+                ["unclaim", input.id, "--force", "--json"],
+                store.systemActor,
+              )
+              .catch(() => undefined);
+          }
+          await store.run(
+            ["update", input.id, "--status", "open", "--json"],
+            slug,
+          );
           await updateTask(
             input.id,
             slug,
@@ -2714,6 +2815,10 @@ export function createTaskRoutes(
             },
             stateMoves(entry.row, "ready"),
           );
+          await stampMove(input.id, slug, [
+            { type: "task.reopened", state: "ready", from: "failed" },
+          ]);
+          await clearDeps(input.id, entry.task.needs, slug);
           const fresh = await taskEntryById(input.id);
           if (fresh === null)
             throw internalAt("the reopened task doesn't read back");
@@ -2753,6 +2858,13 @@ export function createTaskRoutes(
           await updateTask(input.id, slug, {
             [taskKey]: encodeTaskRecord({ ...entry.task, for: assigned }),
           });
+          await stampMove(input.id, slug, [
+            {
+              type: "task.assigned",
+              state: entry.task.state,
+              from: entry.task.state,
+            },
+          ]);
           const fresh = await taskEntryById(input.id);
           if (fresh === null)
             throw internalAt("the assigned task doesn't read back");
@@ -2808,6 +2920,25 @@ export function createTaskRoutes(
           );
           const blocked = entry.task.state === "blocked";
           const state = await settleState(needs.ids, blocked);
+          // A change of needs reads where the fold puts it — waiting while it
+          // has any, ready at once with none, still held when it was held —
+          // and the ready that follows lands as its own event.
+          const mid: TaskState =
+            needs.ids.length === 0
+              ? "ready"
+              : blocked || state === "blocked"
+                ? "blocked"
+                : "waiting";
+          const needsEvents: TaskMoveEntry[] = [
+            {
+              type: "task.needs_changed",
+              state: mid,
+              from: entry.task.state,
+            },
+          ];
+          if (state === "ready" && needs.ids.length > 0 && !blocked) {
+            needsEvents.push({ type: "task.ready", state: "ready" });
+          }
           await updateTask(
             input.id,
             slug,
@@ -2820,6 +2951,7 @@ export function createTaskRoutes(
             },
             stateMoves(entry.row, state),
           );
+          await stampMove(input.id, slug, needsEvents);
           const fresh = await taskEntryById(input.id);
           if (fresh === null)
             throw internalAt("the task whose needs changed doesn't read back");
@@ -2893,6 +3025,14 @@ export function createTaskRoutes(
             },
             stateMoves(entry.row, "canceled"),
           );
+          await stampMove(input.id, slug, [
+            {
+              type: "task.canceled",
+              state: "canceled",
+              from: entry.task.state,
+            },
+          ]);
+          await clearDeps(input.id, entry.task.needs, slug);
           const fresh = await taskEntryById(input.id);
           if (fresh === null)
             throw internalAt("the canceled task doesn't read back");
@@ -2991,6 +3131,10 @@ export function createTaskRoutes(
           { [taskKey]: encodeTaskRecord({ ...fresh.task, state: "ready" }) },
           stateMoves(fresh.row, "ready"),
         );
+        await stampMove(fresh.row.id, store.systemActor, [
+          { type: "task.ready", state: "ready", from: "waiting" },
+        ]);
+        await clearDeps(fresh.row.id, fresh.task.needs, store.systemActor);
       });
     }
   }

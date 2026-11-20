@@ -438,13 +438,23 @@ export function createWatcherRoutes(deps: WatcherRouteDeps): WatcherRoutes {
   const state: PersistedStore = createPersistedStore(store);
   const principalKeyOf = (who: RouteCaller): string => who.principalId;
 
-  /** Every live registration, freshly read (restart-proof, never stale). */
+  /**
+   * Every live registration. Cached in memory between reads: this process
+   * is the tracker's only writer (the README's single-writer contract) and
+   * registrations change only through this bundle's own register, which
+   * invalidates. The matcher reads this once per classified event — a
+   * fresh bd read per event would put the match behind a serial backlog
+   * exactly when the box is busiest.
+   */
+  let registrationCache: { data: RegistrationData }[] | null = null;
   const registrations = async (): Promise<{ data: RegistrationData }[]> => {
+    if (registrationCache !== null) return registrationCache;
     const out: { data: RegistrationData }[] = [];
     for (const record of await state.list("registration")) {
       const data = asRegistration(record.data);
       if (data !== null) out.push({ data });
     }
+    registrationCache = out;
     return out;
   };
 
@@ -820,6 +830,7 @@ export function createWatcherRoutes(deps: WatcherRouteDeps): WatcherRoutes {
         principalKeyOf(who),
         data as unknown as Record<string, JsonValue>,
       );
+      registrationCache = null;
       return viewOf(data);
     },
 
