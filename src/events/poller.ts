@@ -57,11 +57,7 @@ export interface JournalWarning {
 
 /** The poller's lifecycle state. */
 export type PollerStatus =
-  | "idle"
-  | "live"
-  | "disabled"
-  | "truncated"
-  | "stopped";
+  "idle" | "live" | "disabled" | "truncated" | "stopped";
 
 /** The raw wake signal one journal row fans out to subscribers. */
 export interface JournalSignal {
@@ -79,7 +75,9 @@ export type RowOutcome =
   | { kind: "hold" };
 
 /** How the translator resolves a bd actor slug to the writer's identity. */
-export type AuthorLookup = (slug: string | null) => MessageAuthorIdentity | null;
+export type AuthorLookup = (
+  slug: string | null,
+) => MessageAuthorIdentity | null;
 
 export interface TranslatorDeps {
   /** The issue as it is now, or null when it is gone or not a message. */
@@ -129,7 +127,8 @@ function decodeShowRow(data: unknown): BdIssue | null {
   return {
     id,
     title: typeof row.title === "string" ? row.title : undefined,
-    description: typeof row.description === "string" ? row.description : undefined,
+    description:
+      typeof row.description === "string" ? row.description : undefined,
     status: typeof row.status === "string" ? row.status : undefined,
     created_at: typeof row.created_at === "string" ? row.created_at : undefined,
     updated_at: typeof row.updated_at === "string" ? row.updated_at : undefined,
@@ -152,7 +151,8 @@ function decodeLabelList(data: unknown): string[] {
 export function createMessageLoader(
   deps: EnrichmentDeps,
 ): (issueId: string) => Promise<MessageView | null> {
-  const authorFor = deps.authorFor ?? ((): MessageAuthorIdentity | null => null);
+  const authorFor =
+    deps.authorFor ?? ((): MessageAuthorIdentity | null => null);
   return async (issueId) => {
     let shown: BdResult;
     try {
@@ -199,7 +199,10 @@ function writerOf(
       actor: undefined,
     };
   }
-  return { by: identity.by, actor: { ...identity.view, id: identity.by.actor } };
+  return {
+    by: identity.by,
+    actor: { ...identity.view, id: identity.by.actor },
+  };
 }
 
 function postedEvent(
@@ -351,7 +354,8 @@ function reactionDelta(
  */
 export function createEventTranslator(deps: TranslatorDeps): EventTranslator {
   const holdMs = deps.holdMs ?? 2_000;
-  const authorFor = deps.authorFor ?? ((): MessageAuthorIdentity | null => null);
+  const authorFor =
+    deps.authorFor ?? ((): MessageAuthorIdentity | null => null);
   /** issueId → the message as the consumer last classified it. */
   const seen = new Map<string, MessageView>();
   /** issueId → epoch ms of the first unclassifiable read of a bare create. */
@@ -402,13 +406,30 @@ export function createEventTranslator(deps: TranslatorDeps): EventTranslator {
     }
     if (row.op === "close") {
       return view.deleted
-        ? { kind: "event", view: deletedEvent(row, view.id, view.thread, view.from, authorFor, view) }
+        ? {
+            kind: "event",
+            view: deletedEvent(
+              row,
+              view.id,
+              view.thread,
+              view.from,
+              authorFor,
+              view,
+            ),
+          }
         : { kind: "noop" };
     }
     if (row.op === "delete") {
       return {
         kind: "event",
-        view: deletedEvent(row, view.id, view.thread, view.from, authorFor, view),
+        view: deletedEvent(
+          row,
+          view.id,
+          view.thread,
+          view.from,
+          authorFor,
+          view,
+        ),
       };
     }
     // dep_add / dep_remove / comment: the rows fan out as wake signals;
@@ -426,7 +447,17 @@ export function createEventTranslator(deps: TranslatorDeps): EventTranslator {
       // never consumed by this consumer (a resume, or a cursor handed in
       // from elsewhere). Say what the state itself proves, nothing more.
       if (view.deleted) {
-        return { kind: "event", view: deletedEvent(row, view.id, view.thread, view.from, authorFor, view) };
+        return {
+          kind: "event",
+          view: deletedEvent(
+            row,
+            view.id,
+            view.thread,
+            view.from,
+            authorFor,
+            view,
+          ),
+        };
       }
       if (view.revision > 1 || view.editedAt !== null) {
         return { kind: "event", view: editedEvent(row, view, authorFor) };
@@ -434,7 +465,17 @@ export function createEventTranslator(deps: TranslatorDeps): EventTranslator {
       return { kind: "noop" };
     }
     if (!prior.deleted && view.deleted) {
-      return { kind: "event", view: deletedEvent(row, view.id, view.thread, view.from, authorFor, view) };
+      return {
+        kind: "event",
+        view: deletedEvent(
+          row,
+          view.id,
+          view.thread,
+          view.from,
+          authorFor,
+          view,
+        ),
+      };
     }
     if (view.text !== prior.text || view.revision > prior.revision) {
       return { kind: "event", view: editedEvent(row, view, authorFor) };
@@ -450,7 +491,13 @@ export function createEventTranslator(deps: TranslatorDeps): EventTranslator {
     if (reaction) {
       return {
         kind: "event",
-        view: reactionEvent(row, view, reaction.emoji, reaction.added, authorFor),
+        view: reactionEvent(
+          row,
+          view,
+          reaction.emoji,
+          reaction.added,
+          authorFor,
+        ),
       };
     }
     return { kind: "noop" };
@@ -492,7 +539,11 @@ export interface EventPoller {
    * Resolves true once the journal head has moved past `cursor`, false on
    * timeout, abort, or stop. This is the long-poll's early release.
    */
-  waitBeyond(cursor: string, waitMs: number, signal?: AbortSignal): Promise<boolean>;
+  waitBeyond(
+    cursor: string,
+    waitMs: number,
+    signal?: AbortSignal,
+  ): Promise<boolean>;
 }
 
 interface Waiter {
@@ -558,7 +609,12 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
           rawHead = page.cursor;
           for (const row of page.events) {
             for (const fn of recordSubs) {
-              fn({ seq: row.seq, op: row.op, issueId: row.issueId, actor: row.actor });
+              fn({
+                seq: row.seq,
+                op: row.op,
+                issueId: row.issueId,
+                actor: row.actor,
+              });
             }
             const outcome = await translator.translate(row);
             // A held row pins the checkpoint: its classification (a post, or
@@ -576,7 +632,8 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
           status = "truncated";
           rawHead = String(page.head ?? page.floor);
           checkpoint = Math.max(0, Math.max(checkpoint, page.floor - 1));
-          for (const fn of truncatedSubs) fn({ floor: page.floor, head: page.head });
+          for (const fn of truncatedSubs)
+            fn({ floor: page.floor, head: page.head });
           wakeWaiters();
           return;
         }
@@ -642,7 +699,8 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
   ): Promise<boolean> {
     const base = Number(cursor);
     const from = Number.isSafeInteger(base) ? base : 0;
-    if (signal?.aborted || stopped || waitMs <= 0) return Promise.resolve(false);
+    if (signal?.aborted || stopped || waitMs <= 0)
+      return Promise.resolve(false);
     if (rawHeadNumber() > from) return Promise.resolve(true);
     return new Promise((resolve) => {
       const waiter: Waiter = {
@@ -655,7 +713,8 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
       waiter.timer.unref?.();
       signal?.addEventListener("abort", waiter.onAbort, { once: true });
       // The head may have moved while the waiter was being built.
-      if (rawHeadNumber() > from || stopped) release(waiter, rawHeadNumber() > from);
+      if (rawHeadNumber() > from || stopped)
+        release(waiter, rawHeadNumber() > from);
       else waiters.add(waiter);
     });
   }

@@ -71,7 +71,8 @@ const parseArgs = (
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
     if (arg === "--backend" || arg.startsWith("--backend=")) {
-      const value = arg === "--backend" ? argv[i + 1] : arg.slice("--backend=".length);
+      const value =
+        arg === "--backend" ? argv[i + 1] : arg.slice("--backend=".length);
       if (value === "stub" || value === "beads") backend = value;
       else usage(value ?? "(no value)");
       if (arg === "--backend") i++;

@@ -97,10 +97,18 @@ const METHODS: readonly Method[] = [
 ];
 
 /** The methods that answer for real; the rest are refused. */
-const REAL: ReadonlySet<Method> = new Set<Method>(["discovery", "me", "channelMessages"]);
+const REAL: ReadonlySet<Method> = new Set<Method>([
+  "discovery",
+  "me",
+  "channelMessages",
+]);
 
 /** What a board that keeps none of a family says, per family, as the protocol's docs assign. */
-const FAMILIES: readonly { code: string; message: string; methods: readonly Method[] }[] = [
+const FAMILIES: readonly {
+  code: string;
+  message: string;
+  methods: readonly Method[];
+}[] = [
   {
     code: "no_scheduler",
     message: "this board keeps no schedules",
@@ -131,7 +139,14 @@ const FAMILIES: readonly { code: string; message: string; methods: readonly Meth
   {
     code: "no_grants",
     message: "this board keeps no grants",
-    methods: ["grants", "createGrant", "createGrants", "updateGrant", "explain", "revokeGrant"],
+    methods: [
+      "grants",
+      "createGrant",
+      "createGrants",
+      "updateGrant",
+      "explain",
+      "revokeGrant",
+    ],
   },
   {
     code: "no_schemas",
@@ -154,7 +169,11 @@ const FAMILIES: readonly { code: string; message: string; methods: readonly Meth
 const refusalOf = (method: Method): HttpError => {
   const family = FAMILIES.find((own) => own.methods.includes(method));
   if (family) return new HttpError(501, family.code, family.message);
-  return new HttpError(501, "not_supported", `this stub keeps nothing, so ${method} is refused`);
+  return new HttpError(
+    501,
+    "not_supported",
+    `this stub keeps nothing, so ${method} is refused`,
+  );
 };
 
 /** The deployment's own code, as `local()` names it — who this run's `me` says it is. */
@@ -203,7 +222,9 @@ export function createStubBackend(): Backend {
         throw refusalOf(method);
       },
     ]),
-  ) as { [M in Exclude<Method, "discovery" | "me" | "channelMessages">]: () => never };
+  ) as {
+    [M in Exclude<Method, "discovery" | "me" | "channelMessages">]: () => never;
+  };
 
   return {
     routes: [],
