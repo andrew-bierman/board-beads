@@ -43,7 +43,7 @@ describe("threads and messages routes (real bd, mounted through board())", () =>
     fixture = await createBdFixture();
     backend = beads({ dir: fixture.dir, timeoutMs: 120_000 });
     team = board({ backend });
-  }, 120_000);
+  }, 180_000);
 
   test("discovery answers without a token through the real fetch handler", async () => {
     const response = await team.fetch(
@@ -56,11 +56,12 @@ describe("threads and messages routes (real bd, mounted through board())", () =>
     expect((body.url as string).length).toBeGreaterThan(0);
     expect(body.audience).toBe(body.url);
     expect(Array.isArray(body.sync)).toBeTrue();
-    // Explicit: the unit's convention. The first fetch runs bind (bd
-    // version probe, capability probe, state load), and the full suite runs
-    // fixture sets concurrently — bun's 5s default timeout is a loaded-box
+    // Explicit budget, not the unit's 90-120s default: the first fetch runs
+    // bind (bd version probe, capability probe, state load), the full suite
+    // runs fixture sets concurrently, and every test in this file rides the
+    // same loaded-box reality — bun's 5s default is an unloaded-box
     // assumption, not a contract.
-  }, 120_000);
+  }, 180_000);
 
   test("me answers the handle's own identity and full access", async () => {
     const me = await team.me();
@@ -68,7 +69,7 @@ describe("threads and messages routes (real bd, mounted through board())", () =>
     expect(me.principal).toBe("board:client");
     expect(me.profile).toBeNull();
     expect(Object.keys(me.can)).toContain("*");
-  }, 120_000);
+  }, 180_000);
 
   test("post a root and a reply; threads and thread reads see both", async () => {
     const root = await team.post("dev", "root message text");
@@ -96,7 +97,7 @@ describe("threads and messages routes (real bd, mounted through board())", () =>
 
     const messages = await team.channel("dev").messages();
     expect(messages.messages.map((m) => m.id)).toEqual([root.id, reply.id]);
-  }, 90_000);
+  }, 180_000);
 
   test("threads page backward by `older` until it is null, each thread once", async () => {
     const first = await team.post("paging", "paging thread one");
@@ -128,7 +129,7 @@ describe("threads and messages routes (real bd, mounted through board())", () =>
     );
     expect(both.status).toBe(400);
     expect(both.code).toBe("invalid_request");
-  }, 90_000);
+  }, 180_000);
 
   test("channelMessages pages by cursor without repeating or skipping", async () => {
     // Sequential posts keep ids in sequence order.
@@ -153,7 +154,7 @@ describe("threads and messages routes (real bd, mounted through board())", () =>
     // And with no cursor the channel reads whole, oldest first.
     const all = await team.channel("feed").messages();
     expect(all.messages.map((m) => m.id)).toEqual([...ids, fourth.id]);
-  }, 90_000);
+  }, 180_000);
 
   test("edit bumps version and revision; a stale revision answers revision_conflict", async () => {
     const made = await team.post("editing", "original text");
@@ -174,7 +175,7 @@ describe("threads and messages routes (real bd, mounted through board())", () =>
     const after = await team.thread(made.id);
     expect(after.message.text).toBe("edited text once");
     expect(after.message.version).toBe(2);
-  }, 90_000);
+  }, 180_000);
 
   test("react bumps version only, not revision", async () => {
     const made = await team.post("reacting", "react to me");
@@ -188,7 +189,7 @@ describe("threads and messages routes (real bd, mounted through board())", () =>
     await team.react(made.id, "eyes", { remove: true });
     const removed = await team.thread(made.id);
     expect(removed.message.reactions["eyes"]).toEqual([]);
-  }, 90_000);
+  }, 180_000);
 
   test("delete leaves a readable tombstone; deleting again answers ok", async () => {
     const made = await team.post("deleting", "delete me");
@@ -214,7 +215,7 @@ describe("threads and messages routes (real bd, mounted through board())", () =>
     expect(fresh.code).toBe("message_deleted");
     const reacted = await errorOf(team.react(made.id, "eyes"));
     expect(reacted.code).toBe("message_deleted");
-  }, 90_000);
+  }, 180_000);
 
   test("labels round-trip, list by label, and reject reserved prefixes", async () => {
     const made = await team.post("labels", {
@@ -272,7 +273,7 @@ describe("threads and messages routes (real bd, mounted through board())", () =>
       if: { priority: "high" },
     });
     expect(landed.ok).toBeTrue();
-  }, 90_000);
+  }, 180_000);
 
   test("a client id posts once; posted finds it; a stolen id is duplicate_id", async () => {
     const made = await team.post("idempotent", {
@@ -308,7 +309,7 @@ describe("threads and messages routes (real bd, mounted through board())", () =>
     );
     expect(stolen.status).toBe(409);
     expect(stolen.code).toBe("duplicate_id");
-  }, 90_000);
+  }, 180_000);
 
   test("a reply `after` a message lands only while it is the newest", async () => {
     const root = await team.post("fenced", "fence root");
@@ -333,7 +334,7 @@ describe("threads and messages routes (real bd, mounted through board())", () =>
     // Plain replies still land.
     const plain = await team.reply(root.id, "no fence on me");
     expect(plain.re).toBe(root.id);
-  }, 90_000);
+  }, 180_000);
 
   test("three concurrent edits at one revision: exactly one winner, exact 409 codes", async () => {
     const made = await team.post("races", "race edit target");
@@ -356,7 +357,7 @@ describe("threads and messages routes (real bd, mounted through board())", () =>
     expect(final.message.version).toBe(2);
     expect(final.message.revision).toBe(revision + 1);
     expect(["edit A", "edit B", "edit C"]).toContain(final.message.text);
-  }, 90_000);
+  }, 180_000);
 
   test("three concurrent replies after one message: one lands, losers say newer_message", async () => {
     const root = await team.post("races", "race reply root");
@@ -376,7 +377,7 @@ describe("threads and messages routes (real bd, mounted through board())", () =>
     }
     const thread = await team.thread(root.id);
     expect(thread.replies).toHaveLength(1);
-  }, 90_000);
+  }, 180_000);
 
   test("three concurrent label claims racing on no label: one lands, losers label_conflict", async () => {
     const made = await team.post("races", "race label target");
@@ -396,7 +397,7 @@ describe("threads and messages routes (real bd, mounted through board())", () =>
     }
     const labels = (await team.thread(made.id)).message.labels;
     expect(["A", "B", "C"]).toContain(labels.owner);
-  }, 90_000);
+  }, 180_000);
 
   test("a narrowed caller reads only where its can reaches and edits nothing of another's", async () => {
     const alice = team.as("alice");
@@ -438,7 +439,7 @@ describe("threads and messages routes (real bd, mounted through board())", () =>
     await alice.edit(secret.id, "alice revises");
     const revised = await alice.thread(secret.id);
     expect(revised.message.text).toBe("alice revises");
-  }, 90_000);
+  }, 180_000);
 
   test("a new backend instance over the same dir still serves everything", async () => {
     board2 = board({
@@ -456,7 +457,7 @@ describe("threads and messages routes (real bd, mounted through board())", () =>
       const thread = await board2.thread(root.message.id);
       expect(thread.message.id).toBe(root.message.id);
     }
-  }, 90_000);
+  }, 180_000);
 
   test("channels list what posts made, and createChannel answers created", async () => {
     const channels = await team.channels();
@@ -476,7 +477,7 @@ describe("threads and messages routes (real bd, mounted through board())", () =>
     const prefixed = await team.channels({ prefix: "p" });
     expect(prefixed.channels.map((c) => c.path)).toContain("paging");
     expect(prefixed.channels.map((c) => c.path)).not.toContain("dev");
-  }, 90_000);
+  }, 180_000);
 
   test("actors list the caller after it writes", async () => {
     const actors = await team.actors();
@@ -486,7 +487,7 @@ describe("threads and messages routes (real bd, mounted through board())", () =>
     expect(ids).toContain("board:client:alice");
     const alice = actors.find((a) => a.id === "board:client:alice");
     expect(alice?.handle).toBe("alice");
-  }, 90_000);
+  }, 180_000);
 
   test("the events feed rides the same tracker as the threads routes", async () => {
     // The consumer's head so far, as the anchor for what comes next.
@@ -678,5 +679,5 @@ describe("threads and messages routes (real bd, mounted through board())", () =>
     // And the plain reads keep working afterwards: nothing corrupted the tracker.
     const page = await team.threads({ channel: "hostile" });
     expect(page.threads).toHaveLength(1);
-  }, 120_000);
+  }, 180_000);
 });

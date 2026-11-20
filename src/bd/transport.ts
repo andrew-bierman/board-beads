@@ -31,8 +31,14 @@ import {
 } from "./errors.ts";
 import { parseBdVersion, type BdVersion } from "./version.ts";
 
-/** Default per-invocation bound. bd pays engine startup on every call. */
-const DEFAULT_TIMEOUT_MS = 30_000;
+/**
+ * Default per-invocation bound. bd pays engine startup on every call, and
+ * under a loaded box (the full suite runs fixture sets concurrently; at
+ * load ~25 a single invocation runs tens of seconds) thirty seconds kills
+ * legitimate work and its SIGTERM leaves a lock the next calls trip over.
+ * Sixty bounds a truly hung bd without doing that.
+ */
+const DEFAULT_TIMEOUT_MS = 60_000;
 /** How long a timed-out bd gets to exit gracefully (SIGTERM) before SIGKILL. */
 const KILL_GRACE_MS = 1_000;
 /**
