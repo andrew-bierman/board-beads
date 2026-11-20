@@ -160,7 +160,11 @@ function payloadBy(event: BoardEventView): MessageView["by"] | null {
   return null;
 }
 
-function matchesFilters(event: BoardEventView, input: EventsInput): boolean {
+function matchesFilters(
+  event: BoardEventView,
+  input: EventsInput,
+  priorLabels?: MessageView["labels"],
+): boolean {
   const message = event.message;
   if (input.channel !== undefined) {
     if (message === undefined) return false;
@@ -194,15 +198,24 @@ function matchesFilters(event: BoardEventView, input: EventsInput): boolean {
     }
   }
   if (input.label !== undefined) {
-    if (message === undefined) return false;
-    for (const [key, values] of input.label) {
-      const carried = message.labels[key];
-      if (values === null) {
-        if (carried === undefined) return false;
-      } else if (!values.some((value) => carried === value)) {
-        return false;
+    // Matched before the event or after it: a `board.task=ready` feed shows
+    // the claim whose message left `ready`, and the readying whose message
+    // arrived at it. A task state's event carries both, its prior labels
+    // beside its message's own.
+    const wanted = input.label;
+    const matched = (labels: MessageView["labels"] | undefined): boolean => {
+      if (labels === undefined) return false;
+      for (const [key, values] of wanted) {
+        const carried = labels[key];
+        if (values === null) {
+          if (carried === undefined) return false;
+        } else if (!values.some((value) => carried === value)) {
+          return false;
+        }
       }
-    }
+      return true;
+    };
+    if (!matched(message?.labels) && !matched(priorLabels)) return false;
   }
   return true;
 }
@@ -324,6 +337,11 @@ export function createEventRoutes(deps: EventRouteDeps): EventRoutes {
     const base = decodeEventCursor(cursor);
     if (!base.ok) throw invalidAfter(cursor);
     const page = await deps.transport.tailEvents(cursor);
+    // This read just proved the journal answers (a records page — an empty
+    // one included). The loop tails independently and may still be saying
+    // `disabled` off its own empty probe, so the fact travels: the status
+    // is decided by what the journal has answered, not by who asked first.
+    if (page.kind === "records") poller.noteAnswered();
     if (page.kind === "truncated") {
       return { kind: "truncated", floor: page.floor, head: page.head };
     }
@@ -341,8 +359,14 @@ export function createEventRoutes(deps: EventRouteDeps): EventRoutes {
         break;
       }
       advanced = row.seq;
-      if (outcome.kind === "event" && matchesFilters(outcome.view, input)) {
+      if (outcome.kind !== "event") continue;
+      if (matchesFilters(outcome.view, input, outcome.taskEvents?.[0]?.priorLabels)) {
         matched.push(outcome.view);
+      }
+      for (const one of outcome.taskEvents ?? []) {
+        if (matchesFilters(one.view, input, one.priorLabels)) {
+          matched.push(one.view);
+        }
       }
     }
     return { kind: "page", events: matched, cursor: String(advanced), held };

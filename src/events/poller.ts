@@ -43,6 +43,7 @@ import type {
   BdResult,
 } from "../bd/transport.ts";
 import { issueToMessage } from "../model/message.ts";
+import { projectTaskView, taskRecordOf } from "../tasks/record.ts";
 import type {
   BdIssue,
   LabelsApi,
@@ -71,8 +72,34 @@ export interface JournalSignal {
 }
 
 /** What one journal row classifies as. */
+export interface TranslatedEvent {
+  view: BoardEventView;
+  /**
+   * Task-state events ride the feed only: watchers and syncs hear message
+   * changes, and a task's state moves are the feed's to carry.
+   */
+  feedOnly?: boolean;
+  /**
+   * The message's labels as this row found them, when the event is a task's
+   * state move: the feed matches a label filter on the labels before the
+   * event or after it, so a `board.task=ready` feed still shows the claim
+   * whose message left `ready`.
+   */
+  priorLabels?: MessageView["labels"];
+}
+
 export type RowOutcome =
-  | { kind: "event"; view: BoardEventView }
+  | {
+      kind: "event";
+      /** The row's message event, or — on a task-only row — its first task event. */
+      view: BoardEventView;
+      /**
+       * The task-state events the row's diff carries (created, ready,
+       * claimed, blocked, unblocked, needs_changed, expired, …), beside the
+       * message event. The feed serves them; nothing else consumes them.
+       */
+      taskEvents?: TranslatedEvent[];
+    }
   | { kind: "noop" }
   | { kind: "skip" }
   | { kind: "hold" };
@@ -211,6 +238,13 @@ export function createMessageLoader(
 ): (issueId: string, row?: BdJournalRecord) => Promise<MessageView | null> {
   const authorFor =
     deps.authorFor ?? ((): MessageAuthorIdentity | null => null);
+  /** A task root reads as its thread: the record rides the same blob. */
+  const attachTask = (view: MessageView, metadata: unknown): void => {
+    const decoded = deps.codec.decode(metadata);
+    if (!decoded.ok || decoded.value.role !== "message") return;
+    const task = projectTaskView(decoded.value, taskRecordOf(deps.codec, metadata), null);
+    if (task !== null) view.task = task;
+  };
   return async (issueId, row) => {
     if (row !== undefined) {
       const snapshot = snapshotOf(row);
@@ -221,7 +255,10 @@ export function createMessageLoader(
           authorFor,
           bdLabels: snapshot.labels,
         });
-        if (view.ok) return view.value;
+        if (view.ok) {
+          attachTask(view.value, snapshot.issue.metadata);
+          return view.value;
+        }
         if (
           snapshot.issue.metadata !== undefined &&
           snapshot.issue.metadata !== null
@@ -260,7 +297,9 @@ export function createMessageLoader(
       authorFor,
       bdLabels,
     });
-    return view.ok ? view.value : null;
+    if (!view.ok) return null;
+    attachTask(view.value, issue.metadata);
+    return view.value;
   };
 }
 
@@ -449,6 +488,215 @@ function labelsAtRow(row: BdJournalRecord): string[] | null {
 }
 
 /**
+ * The task events one row's change of task state carries, read as a diff of
+ * the task before and after the row — the same events Board's own engine
+ * appends per write, with each event's message showing the task as that
+ * event leaves it: a created task that names needs shows `waiting` until its
+ * `task.ready` says otherwise, and the unblock of one whose needs completed
+ * in its hold lands as `unblocked` (waiting) then `ready`. A claim whose
+ * lease ran out reads as expired, however the flip landed; one handed back
+ * before its end reads as released.
+ */
+function taskEvents(
+  row: BdJournalRecord,
+  prior: MessageView | null,
+  view: MessageView,
+  authorFor: AuthorLookup,
+): TranslatedEvent[] {
+  const now = view.task;
+  if (now === undefined) return [];
+  const before = prior?.task ?? null;
+  const id = view.id;
+  const thread = view.thread;
+  const { actor } = writerOf(row, authorFor);
+  const by =
+    authorFor(row.actor)?.by ?? {
+      actor: row.actor,
+      principal: "",
+      profile: null,
+    };
+  const made = (
+    type: string,
+    payload: Record<string, unknown>,
+    state: NonNullable<MessageView["task"]>["state"],
+  ): TranslatedEvent => ({
+    view: {
+      cursor: String(row.seq),
+      type,
+      createdAt: row.ts,
+      payload,
+      message: { ...view, task: { ...now, state } },
+      actor,
+    } as BoardEventView,
+    feedOnly: true,
+    priorLabels: prior?.labels,
+  });
+  const sameSet = (a: readonly string[], b: readonly string[]): boolean =>
+    a.length === b.length && a.every((one) => b.includes(one));
+
+  // Created — as its thread is made one (or as this consumer first sees
+  // it): it waits while it names needs, is ready in the same write once
+  // they've all completed, and claimed after when the write claimed it.
+  if (before === null) {
+    const events: TranslatedEvent[] = [
+      made(
+        "task.created",
+        { id, thread, needs: [...now.needs], for: now.for, by },
+        now.needs.length > 0 ? "waiting" : "ready",
+      ),
+    ];
+    if (now.needs.length > 0 && now.state === "ready") {
+      events.push(made("task.ready", { id, thread }, "ready"));
+    }
+    if (now.state === "claimed") {
+      events.push(
+        made(
+          "task.claimed",
+          {
+            id,
+            thread,
+            epoch: now.epoch,
+            until: now.claim?.until ?? "",
+            by,
+          },
+          "claimed",
+        ),
+      );
+    }
+    return events;
+  }
+
+  if (!sameSet(before.needs, now.needs)) {
+    // A change of needs reads where the fold puts it: waiting while it has
+    // any, ready at once with none, still held when it was held. The ready
+    // that follows lands as its own event, the way the board appends it.
+    const mid =
+      now.needs.length === 0
+        ? "ready"
+        : before.state === "blocked" || now.state === "blocked"
+          ? "blocked"
+          : "waiting";
+    const events: TranslatedEvent[] = [
+      made("task.needs_changed", { id, thread, needs: [...now.needs], by }, mid),
+    ];
+    if (now.state === "ready" && now.needs.length > 0 && before.state !== "blocked") {
+      events.push(made("task.ready", { id, thread }, "ready"));
+    }
+    return events;
+  }
+
+  if (before.state === now.state) {
+    // The task steady while its record moved: a renewal, or an assignment.
+    if (
+      before.claim !== null &&
+      now.claim !== null &&
+      before.claim.until !== now.claim.until
+    ) {
+      return [
+        made(
+          "task.renewed",
+          { id, thread, epoch: now.epoch, until: now.claim.until, by },
+          now.state,
+        ),
+      ];
+    }
+    if (before.for !== now.for) {
+      return [made("task.assigned", { id, thread, for: now.for, by }, now.state)];
+    }
+    return [];
+  }
+
+  // A claim that ran out its lease expired first, whatever the flip lands on.
+  const lapsed =
+    before.state === "claimed" &&
+    before.claim !== null &&
+    Date.parse(before.claim.until) <= Date.parse(row.ts);
+  if (lapsed) {
+    return [
+      made("task.expired", { id, thread, epoch: before.epoch }, now.state),
+    ];
+  }
+
+  switch (now.state) {
+    case "claimed":
+      return [
+        made(
+          "task.claimed",
+          { id, thread, epoch: now.epoch, until: now.claim?.until ?? "", by },
+          "claimed",
+        ),
+      ];
+    case "blocked":
+      return [
+        made(
+          "task.blocked",
+          {
+            id,
+            thread,
+            kind: now.blocked?.kind ?? null,
+            reason: now.blocked?.reason ?? "",
+            by,
+          },
+          "blocked",
+        ),
+      ];
+    case "completed":
+      return [
+        made(
+          "task.completed",
+          { id, thread, epoch: before.epoch, result: now.result, by },
+          "completed",
+        ),
+      ];
+    case "failed":
+      return [
+        made(
+          "task.failed",
+          { id, thread, epoch: before.epoch, reason: now.reason ?? "", by },
+          "failed",
+        ),
+      ];
+    case "canceled":
+      return [
+        made("task.canceled", { id, thread, reason: now.reason ?? "", by }, "canceled"),
+      ];
+    case "ready":
+    case "waiting": {
+      // Unblocked: ready at once with no needs; with some, it waits first
+      // and the ready that follows is its own event.
+      if (before.state === "blocked") {
+        const events: TranslatedEvent[] = [
+          made(
+            "task.unblocked",
+            { id, thread, by },
+            now.needs.length > 0 ? "waiting" : now.state,
+          ),
+        ];
+        if (now.needs.length > 0 && now.state === "ready") {
+          events.push(made("task.ready", { id, thread }, "ready"));
+        }
+        return events;
+      }
+      if (before.state === "failed") {
+        return [made("task.reopened", { id, thread, by }, "ready")];
+      }
+      if (before.state === "claimed") {
+        return [
+          made("task.released", { id, thread, epoch: before.epoch, by }, now.state),
+        ];
+      }
+      // What waited only for a task that completed is ready.
+      if (before.state === "waiting") {
+        return [made("task.ready", { id, thread }, "ready")];
+      }
+      return [];
+    }
+    default:
+      return [];
+  }
+}
+
+/**
  * The row classifier. State lives across rows (per issue: the last
  * classified message state, and a create row's first hold), so one
  * translator instance serves one consumer; the feed and the poller each
@@ -503,6 +751,8 @@ export function createEventTranslator(deps: TranslatorDeps): EventTranslator {
     // this consumer already holds — on a loaded box that is two bd
     // invocations per row per walk, and from-zero walks replay rows.
     if (row.op === "create" && prior !== null && bareCreateRow(row)) {
+      // Replayed, so already synthesized: the cached state answers, and no
+      // task events again on top of it.
       return { kind: "event", view: postedEvent(row, prior, authorFor) };
     }
     const view = await deps.loadMessage(row.issueId, row);
@@ -554,10 +804,27 @@ export function createEventTranslator(deps: TranslatorDeps): EventTranslator {
     seen.set(row.issueId, labeled);
 
     if (row.op === "create") {
-      return { kind: "event", view: postedEvent(row, view, authorFor) };
+      // A thread that is a task posts with its task events: created, ready
+      // once what it names has completed, claimed when the write claimed it.
+      const firstSight = prior === null || prior.task === undefined;
+      return {
+        kind: "event",
+        view: postedEvent(row, view, authorFor),
+        ...(firstSight
+          ? { taskEvents: taskEvents(row, null, view, authorFor) }
+          : {}),
+      };
     }
     if (row.op === "update") {
-      return classifyUpdate(row, prior ?? null, labeled);
+      const base = classifyUpdate(row, prior ?? null, labeled);
+      // A task's state can move with no message-visible delta (a renewal is
+      // metadata alone), so the task diff rides even a no-op base row.
+      const moves = taskEvents(row, prior ?? null, view, authorFor);
+      if (base.kind === "event") {
+        return { kind: "event", view: base.view, ...(moves.length > 0 ? { taskEvents: moves } : {}) };
+      }
+      if (moves.length === 0) return { kind: "noop" };
+      return { kind: "event", view: moves[0]!.view, taskEvents: moves };
     }
     if (row.op === "close") {
       return view.deleted
@@ -699,6 +966,14 @@ export interface EventPoller {
     waitMs: number,
     signal?: AbortSignal,
   ): Promise<boolean>;
+  /**
+   * Records that the journal has ANSWERED a read (a records page, empty
+   * included). The feed's reads tail the journal independently of this
+   * loop, so a successful read is proof the workspace records, and a
+   * loop still saying `disabled` is behind the facts. Only a tail that
+   * names itself disabled, with no answering read ever seen, means that.
+   */
+  noteAnswered(): void;
 }
 
 interface Waiter {
@@ -965,6 +1240,11 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
     return rawHead;
   }
 
+  function noteAnswered(): void {
+    journalEnabledSeen = true;
+    if (!stopped && status === "disabled") status = "live";
+  }
+
   function waitBeyond(
     cursor: string,
     waitMs: number,
@@ -1022,6 +1302,7 @@ export function createEventPoller(deps: EventPollerDeps): EventPoller {
       return warnings;
     },
     head,
+    noteAnswered,
     start,
     tick,
     stop,
