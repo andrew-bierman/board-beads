@@ -102,7 +102,9 @@ No dates, no promises beyond "0.x". Config keys are additive forever — a knob 
 - [x] Package foundation — Bun-native gates, CI, real-bd fixtures, conformance harness inventory
 - [x] Conformance-green core — discovery, messages, threads, event feed, watchers, sync records
 - [x] Tasks — claims, leases, heartbeats, expiry via `bd`
-- [ ] Schedules, grants, schemas, attachments
+- [x] Schemas — definition store, immutable versions, value validation
+- [ ] Grants, attachments
+- [ ] Schedules
 - [ ] Search
 - [ ] Writer modes — journal-aware reconciliation for out-of-band writers
 - [ ] Server-authority mode — `bd serve` / proxied-server for multi-machine fleets
