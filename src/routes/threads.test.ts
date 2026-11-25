@@ -769,66 +769,59 @@ describe("threads and messages routes (real bd, mounted through board())", () =>
     expect(canceled?.message?.task?.state).toBe("canceled");
   }, 180_000);
 
-  // CI-only red under the official bd binary (issue #11): the task.ready event
-  // doesn't reach the feed on the runner's bd build. Un-skip when the bind-time
-  // journal-shape probe lands.
-  test.skipIf(Boolean(process.env.CI))(
-    "the feed carries a task's state moves, and a board.task=ready filter still sees the claim",
-    async () => {
-      const anchor = (await team.poll({ channel: "t-feed" })).cursor;
-      const first = await team.tasks.create("t-feed", {
-        text: "a prerequisite to watch",
-        labels: { conformance: "feed" },
-      });
-      const second = await team.tasks.create("t-feed", {
-        text: "a task to watch become ready",
-        labels: { conformance: "feed" },
-        needs: [first.task.id],
-      });
-      await (await team.tasks.claim(first.task.id, { lease: 60 })).complete();
-      // The readying lands on the feed with the state after each event. Under
-      // load the feed's cadence slips, so settle: bounded retries until the
-      // event appears or the budget runs out (the event must appear).
-      const findEvent = async (
-        poll: Parameters<typeof team.poll>[0],
-        match: (event: { type: string; message?: { id: string } }) => boolean,
-      ) => {
-        for (let attempt = 0; attempt < 10; attempt++) {
-          const page = await team.poll(poll);
-          const found = page.events.find(match);
-          if (found !== undefined) return { found, lastPage: page };
-          poll = { ...poll, wait: 10 };
-        }
-        return { found: undefined, lastPage: undefined };
-      };
-      const { found: ready } = await findEvent(
-        { channel: "t-feed", after: anchor, wait: 10 },
-        (event) =>
-          event.type === "task.ready" && event.message?.id === second.task.id,
-      );
-      expect(ready).toBeTruthy();
-      expect(ready?.message?.task?.state).toBe("ready");
-      // The filter taken before the claim still shows the claim: the event
-      // matches on the labels before it or after it.
-      const claim = await team.tasks.claim(second.task.id, { lease: 60 });
-      const { found: claimed, lastPage: claimedPage } = await findEvent(
-        {
-          channel: "t-feed",
-          after: anchor,
-          label: ["conformance=feed", "board.task=ready"],
-          wait: 10,
-        },
-        (event) =>
-          event.type === "task.claimed" && event.message?.id === second.task.id,
-      );
-      expect(claimed).toBeTruthy();
-      expect(claimed?.message?.task?.state).toBe("claimed");
-      // And a claim's token shows nowhere on the feed.
-      expect(JSON.stringify(claimedPage?.events ?? [])).not.toContain(
-        claim.token,
-      );
-      await claim.release();
-    },
-    180_000,
-  );
+  test("the feed carries a task's state moves, and a board.task=ready filter still sees the claim", async () => {
+    const anchor = (await team.poll({ channel: "t-feed" })).cursor;
+    const first = await team.tasks.create("t-feed", {
+      text: "a prerequisite to watch",
+      labels: { conformance: "feed" },
+    });
+    const second = await team.tasks.create("t-feed", {
+      text: "a task to watch become ready",
+      labels: { conformance: "feed" },
+      needs: [first.task.id],
+    });
+    await (await team.tasks.claim(first.task.id, { lease: 60 })).complete();
+    // The readying lands on the feed with the state after each event. Under
+    // load the feed's cadence slips, so settle: bounded retries until the
+    // event appears or the budget runs out (the event must appear).
+    const findEvent = async (
+      poll: Parameters<typeof team.poll>[0],
+      match: (event: { type: string; message?: { id: string } }) => boolean,
+    ) => {
+      for (let attempt = 0; attempt < 10; attempt++) {
+        const page = await team.poll(poll);
+        const found = page.events.find(match);
+        if (found !== undefined) return { found, lastPage: page };
+        poll = { ...poll, wait: 10 };
+      }
+      return { found: undefined, lastPage: undefined };
+    };
+    const { found: ready } = await findEvent(
+      { channel: "t-feed", after: anchor, wait: 10 },
+      (event) =>
+        event.type === "task.ready" && event.message?.id === second.task.id,
+    );
+    expect(ready).toBeTruthy();
+    expect(ready?.message?.task?.state).toBe("ready");
+    // The filter taken before the claim still shows the claim: the event
+    // matches on the labels before it or after it.
+    const claim = await team.tasks.claim(second.task.id, { lease: 60 });
+    const { found: claimed, lastPage: claimedPage } = await findEvent(
+      {
+        channel: "t-feed",
+        after: anchor,
+        label: ["conformance=feed", "board.task=ready"],
+        wait: 10,
+      },
+      (event) =>
+        event.type === "task.claimed" && event.message?.id === second.task.id,
+    );
+    expect(claimed).toBeTruthy();
+    expect(claimed?.message?.task?.state).toBe("claimed");
+    // And a claim's token shows nowhere on the feed.
+    expect(JSON.stringify(claimedPage?.events ?? [])).not.toContain(
+      claim.token,
+    );
+    await claim.release();
+  }, 180_000);
 });
