@@ -14,7 +14,7 @@ board-beads is an npm package exporting `beads()` — a [Board](https://github.c
 
 ## Status
 
-**`beads()` is functional as of 0.2.0** — threads/messages, events, tasks with fenced claims/leases, watchers, and sync records are implemented and pass Board's own conformance suite on every kept group (receipt in `evidence/`). Schedules, grants, schemas, attachments, and search answer 501 by declared design — they land in upcoming 0.x minors. See the [implementation plan](https://github.com/andrew-bierman/board-beads/blob/main/docs/plans/2026-11-19-1356-feat-board-beads-backend-plan.md) and the [changelog](CHANGELOG.md).
+**`beads()` is functional as of 0.2.0** — threads/messages, events, tasks with fenced claims/leases, watchers, and sync records are implemented and pass Board's own conformance suite on every kept group (receipt in `evidence/`). Version 0.3.0 adds a schema definition store, immutable schema versions, and value validation. Schedules, grants, attachments, and search still return HTTP 501. See the [implementation plan](https://github.com/andrew-bierman/board-beads/blob/main/docs/plans/2026-11-19-1356-feat-board-beads-backend-plan.md) and the [changelog](CHANGELOG.md).
 
 ## Why
 
